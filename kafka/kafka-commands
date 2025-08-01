@@ -1,0 +1,13 @@
+docker exec kafka1 kafka-topics --create \
+  --topic apache-beam-stream \
+  --bootstrap-server kafka1:29092 \
+  --partitions 3 \
+  --replication-factor 3
+
+docker exec kafka1 kafka-topics --list \
+  --bootstrap-server kafka1:29092
+
+docker exec -it kafka1 kafka-console-producer \
+  --topic apache-beam-stream \
+  --bootstrap-server localhost:29092
+
