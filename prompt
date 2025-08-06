@@ -1,0 +1,1 @@
+I have a spring boot project which every user call a rest service to get some data and every request to the service must create a new apache beam pipeline for every service call an read the data comming from a specific Kafka topic it is possible a topic belongs to multiple pipelines
