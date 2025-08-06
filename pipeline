@@ -1,0 +1,792 @@
+// pom.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+        <relativePath/>
+    </parent>
+    
+    <groupId>com.example</groupId>
+    <artifactId>beam-streaming-processor</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    
+    <properties>
+        <java.version>11</java.version>
+        <beam.version>2.50.0</beam.version>
+    </properties>
+    
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-sdks-java-core</artifactId>
+            <version>${beam.version}</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-runners-direct-java</artifactId>
+            <version>${beam.version}</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-sdks-java-io-kafka</artifactId>
+            <version>${beam.version}</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+// ===== Application Configuration =====
+
+// src/main/resources/application.yml
+server:
+  port: 8080
+
+spring:
+  redis:
+    host: localhost
+    port: 6379
+    timeout: 2000ms
+    
+kafka:
+  bootstrap-servers: localhost:9092
+  
+beam:
+  streaming:
+    window-size-seconds: 10
+    allowed-lateness-seconds: 5
+    trigger-frequency-seconds: 2
+    max-concurrent-pipelines: 10
+
+websocket:
+  endpoint: /ws
+  allowed-origins: "*"
+
+logging:
+  level:
+    com.example: DEBUG
+
+// ===== Main Application Class =====
+
+// src/main/java/com/example/BeamStreamingProcessorApplication.java
+package com.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.scheduling.annotation.EnableAsync;
+
+@SpringBootApplication
+@EnableCaching
+@EnableAsync
+public class BeamStreamingProcessorApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(BeamStreamingProcessorApplication.class, args);
+    }
+}
+
+// ===== Configuration Properties =====
+
+// src/main/java/com/example/config/StreamingProperties.java
+package com.example.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+@Component
+@ConfigurationProperties(prefix = "beam.streaming")
+public class StreamingProperties {
+    private int windowSizeSeconds = 10;
+    private int allowedLatenessSeconds = 5;
+    private int triggerFrequencySeconds = 2;
+    private int maxConcurrentPipelines = 10;
+    
+    // Getters and setters
+    public int getWindowSizeSeconds() { return windowSizeSeconds; }
+    public void setWindowSizeSeconds(int windowSizeSeconds) { this.windowSizeSeconds = windowSizeSeconds; }
+    
+    public int getAllowedLatenessSeconds() { return allowedLatenessSeconds; }
+    public void setAllowedLatenessSeconds(int allowedLatenessSeconds) { this.allowedLatenessSeconds = allowedLatenessSeconds; }
+    
+    public int getTriggerFrequencySeconds() { return triggerFrequencySeconds; }
+    public void setTriggerFrequencySeconds(int triggerFrequencySeconds) { this.triggerFrequencySeconds = triggerFrequencySeconds; }
+    
+    public int getMaxConcurrentPipelines() { return maxConcurrentPipelines; }
+    public void setMaxConcurrentPipelines(int maxConcurrentPipelines) { this.maxConcurrentPipelines = maxConcurrentPipelines; }
+}
+
+// src/main/java/com/example/config/KafkaProperties.java
+package com.example.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+@Component
+@ConfigurationProperties(prefix = "kafka")
+public class KafkaProperties {
+    private String bootstrapServers;
+    
+    public String getBootstrapServers() { return bootstrapServers; }
+    public void setBootstrapServers(String bootstrapServers) { this.bootstrapServers = bootstrapServers; }
+}
+
+// ===== Data Models =====
+
+// src/main/java/com/example/model/StreamingRequest.java
+package com.example.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class StreamingRequest {
+    private String userId;
+    private String sessionId;
+    private String topicName;
+    private String filterCriteria;
+    private WindowConfig windowConfig;
+    
+    public static class WindowConfig {
+        private int windowSizeSeconds = 10;
+        private int allowedLatenessSeconds = 5;
+        private int triggerFrequencySeconds = 2;
+        private String windowType = "FIXED"; // FIXED, SLIDING, SESSION
+        
+        // Getters and setters
+        public int getWindowSizeSeconds() { return windowSizeSeconds; }
+        public void setWindowSizeSeconds(int windowSizeSeconds) { this.windowSizeSeconds = windowSizeSeconds; }
+        
+        public int getAllowedLatenessSeconds() { return allowedLatenessSeconds; }
+        public void setAllowedLatenessSeconds(int allowedLatenessSeconds) { this.allowedLatenessSeconds = allowedLatenessSeconds; }
+        
+        public int getTriggerFrequencySeconds() { return triggerFrequencySeconds; }
+        public void setTriggerFrequencySeconds(int triggerFrequencySeconds) { this.triggerFrequencySeconds = triggerFrequencySeconds; }
+        
+        public String getWindowType() { return windowType; }
+        public void setWindowType(String windowType) { this.windowType = windowType; }
+    }
+    
+    // Constructors
+    public StreamingRequest() {
+        this.windowConfig = new WindowConfig();
+    }
+    
+    // Getters and setters
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    
+    public String getTopicName() { return topicName; }
+    public void setTopicName(String topicName) { this.topicName = topicName; }
+    
+    public String getFilterCriteria() { return filterCriteria; }
+    public void setFilterCriteria(String filterCriteria) { this.filterCriteria = filterCriteria; }
+    
+    public WindowConfig getWindowConfig() { return windowConfig; }
+    public void setWindowConfig(WindowConfig windowConfig) { this.windowConfig = windowConfig; }
+}
+
+// src/main/java/com/example/model/StreamingResult.java
+package com.example.model;
+
+import java.time.Instant;
+import java.util.List;
+
+public class StreamingResult {
+    private String pipelineId;
+    private String userId;
+    private String sessionId;
+    private Instant windowStart;
+    private Instant windowEnd;
+    private List<ProcessedRecord> records;
+    private long recordCount;
+    private String aggregateData;
+    
+    public static class ProcessedRecord {
+        private String originalData;
+        private String processedData;
+        private Instant timestamp;
+        private String key;
+        
+        public ProcessedRecord(String originalData, String processedData, Instant timestamp, String key) {
+            this.originalData = originalData;
+            this.processedData = processedData;
+            this.timestamp = timestamp;
+            this.key = key;
+        }
+        
+        // Getters and setters
+        public String getOriginalData() { return originalData; }
+        public void setOriginalData(String originalData) { this.originalData = originalData; }
+        
+        public String getProcessedData() { return processedData; }
+        public void setProcessedData(String processedData) { this.processedData = processedData; }
+        
+        public Instant getTimestamp() { return timestamp; }
+        public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
+        
+        public String getKey() { return key; }
+        public void setKey(String key) { this.key = key; }
+    }
+    
+    // Getters and setters
+    public String getPipelineId() { return pipelineId; }
+    public void setPipelineId(String pipelineId) { this.pipelineId = pipelineId; }
+    
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    
+    public Instant getWindowStart() { return windowStart; }
+    public void setWindowStart(Instant windowStart) { this.windowStart = windowStart; }
+    
+    public Instant getWindowEnd() { return windowEnd; }
+    public void setWindowEnd(Instant windowEnd) { this.windowEnd = windowEnd; }
+    
+    public List<ProcessedRecord> getRecords() { return records; }
+    public void setRecords(List<ProcessedRecord> records) { this.records = records; }
+    
+    public long getRecordCount() { return recordCount; }
+    public void setRecordCount(long recordCount) { this.recordCount = recordCount; }
+    
+    public String getAggregateData() { return aggregateData; }
+    public void setAggregateData(String aggregateData) { this.aggregateData = aggregateData; }
+}
+
+// ===== Apache Beam Streaming Pipeline =====
+
+// src/main/java/com/example/beam/StreamingPipeline.java
+package com.example.beam;
+
+import com.example.model.StreamingRequest;
+import com.example.model.StreamingResult;
+import com.example.service.ResultPublisher;
+import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.io.kafka.KafkaIO;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.transforms.windowing.*;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.TimestampedValue;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.joda.time.Duration;
+import org.joda.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+@Component
+public class StreamingPipeline {
+    private static final Logger logger = LoggerFactory.getLogger(StreamingPipeline.class);
+    
+    @Autowired
+    private ResultPublisher resultPublisher;
+    
+    private final Map<String, PipelineRunner> activePipelines = new ConcurrentHashMap<>();
+    
+    public String startStreamingPipeline(StreamingRequest request, String bootstrapServers) {
+        String pipelineId = generatePipelineId(request);
+        
+        if (activePipelines.containsKey(pipelineId)) {
+            logger.info("Pipeline already exists for user: {} and topic: {}", request.getUserId(), request.getTopicName());
+            return pipelineId;
+        }
+        
+        try {
+            PipelineRunner runner = new PipelineRunner(pipelineId, request, bootstrapServers);
+            activePipelines.put(pipelineId, runner);
+            runner.start();
+            
+            logger.info("Started streaming pipeline: {} for user: {}", pipelineId, request.getUserId());
+            return pipelineId;
+        } catch (Exception e) {
+            logger.error("Failed to start streaming pipeline for user: {}", request.getUserId(), e);
+            throw new RuntimeException("Failed to start streaming pipeline", e);
+        }
+    }
+    
+    public void stopStreamingPipeline(String pipelineId) {
+        PipelineRunner runner = activePipelines.remove(pipelineId);
+        if (runner != null) {
+            runner.stop();
+            logger.info("Stopped streaming pipeline: {}", pipelineId);
+        }
+    }
+    
+    public void stopStreamingPipelineForUser(String userId, String topicName) {
+        String pipelineId = userId + "-" + topicName;
+        stopStreamingPipeline(pipelineId);
+    }
+    
+    public boolean isPipelineActive(String pipelineId) {
+        return activePipelines.containsKey(pipelineId);
+    }
+    
+    public Set<String> getActivePipelineIds() {
+        return new HashSet<>(activePipelines.keySet());
+    }
+    
+    private String generatePipelineId(StreamingRequest request) {
+        return request.getUserId() + "-" + request.getTopicName();
+    }
+    
+    private class PipelineRunner {
+        private final String pipelineId;
+        private final StreamingRequest request;
+        private final String bootstrapServers;
+        private final AtomicBoolean isRunning = new AtomicBoolean(false);
+        private PipelineResult pipelineResult;
+        
+        public PipelineRunner(String pipelineId, StreamingRequest request, String bootstrapServers) {
+            this.pipelineId = pipelineId;
+            this.request = request;
+            this.bootstrapServers = bootstrapServers;
+        }
+        
+        public void start() {
+            if (isRunning.compareAndSet(false, true)) {
+                Thread pipelineThread = new Thread(this::runPipeline);
+                pipelineThread.setName("StreamingPipeline-" + pipelineId);
+                pipelineThread.start();
+            }
+        }
+        
+        public void stop() {
+            if (isRunning.compareAndSet(true, false)) {
+                if (pipelineResult != null) {
+                    try {
+                        pipelineResult.cancel();
+                        logger.info("Pipeline {} cancelled successfully", pipelineId);
+                    } catch (Exception e) {
+                        logger.warn("Error cancelling pipeline {}: {}", pipelineId, e.getMessage());
+                    }
+                }
+            }
+        }
+        
+        private void runPipeline() {
+            try {
+                PipelineOptions options = PipelineOptionsFactory.create();
+                options.setJobName("streaming-job-" + pipelineId);
+                
+                Pipeline pipeline = Pipeline.create(options);
+                
+                // Read streaming data from Kafka
+                PCollection<KV<String, String>> kafkaStream = pipeline
+                    .apply("ReadFromKafka", KafkaIO.<String, String>read()
+                        .withBootstrapServers(bootstrapServers)
+                        .withTopic(request.getTopicName())
+                        .withKeyDeserializer(StringDeserializer.class)
+                        .withValueDeserializer(StringDeserializer.class)
+                        .withConsumerConfigUpdates(Map.of(
+                            "group.id", "streaming-processor-" + pipelineId,
+                            "auto.offset.reset", "latest"
+                        ))
+                        .withReadCommitted());
+                
+                // Apply windowing strategy
+                Window<KV<String, String>> windowTransform = createWindowTransform(request.getWindowConfig());
+                
+                PCollection<KV<String, String>> windowedData = kafkaStream
+                    .apply("ApplyWindowing", windowTransform);
+                
+                // Filter and process data
+                PCollection<KV<String, String>> filteredData = windowedData
+                    .apply("FilterData", Filter.by(kv -> applyFilter(kv.getValue(), request.getFilterCriteria())));
+                
+                // Process and aggregate data within windows
+                PCollection<StreamingResult> processedResults = filteredData
+                    .apply("ProcessWindow", ParDo.of(new WindowProcessor(pipelineId, request)));
+                
+                // Group by window and aggregate
+                PCollection<StreamingResult> aggregatedResults = processedResults
+                    .apply("GroupByWindow", GroupByKey.<String, StreamingResult>create()
+                        .withHotKeyFanout(10))
+                    .apply("AggregateWindow", ParDo.of(new WindowAggregator(pipelineId, request)));
+                
+                // Publish results
+                aggregatedResults.apply("PublishResults", ParDo.of(new DoFn<StreamingResult, Void>() {
+                    @ProcessElement
+                    public void processElement(ProcessContext c) {
+                        StreamingResult result = c.element();
+                        logger.debug("Publishing result for window: {} - {}", result.getWindowStart(), result.getWindowEnd());
+                        resultPublisher.publishResult(result);
+                    }
+                }));
+                
+                // Run the pipeline
+                pipelineResult = pipeline.run();
+                pipelineResult.waitUntilFinish();
+                
+            } catch (Exception e) {
+                logger.error("Streaming pipeline {} failed", pipelineId, e);
+            } finally {
+                isRunning.set(false);
+                activePipelines.remove(pipelineId);
+            }
+        }
+        
+        private Window<KV<String, String>> createWindowTransform(StreamingRequest.WindowConfig config) {
+            Window<KV<String, String>> window;
+            
+            switch (config.getWindowType().toUpperCase()) {
+                case "SLIDING":
+                    window = Window.<KV<String, String>>into(
+                        SlidingWindows.of(Duration.standardSeconds(config.getWindowSizeSeconds()))
+                            .every(Duration.standardSeconds(config.getTriggerFrequencySeconds()))
+                    );
+                    break;
+                case "SESSION":
+                    window = Window.<KV<String, String>>into(
+                        Sessions.withGapDuration(Duration.standardSeconds(config.getWindowSizeSeconds()))
+                    );
+                    break;
+                case "FIXED":
+                default:
+                    window = Window.<KV<String, String>>into(
+                        FixedWindows.of(Duration.standardSeconds(config.getWindowSizeSeconds()))
+                    );
+                    break;
+            }
+            
+            return window
+                .triggering(
+                    AfterWatermark.pastEndOfWindow()
+                        .withEarlyFirings(AfterProcessingTime.pastFirstElementInPane()
+                            .plusDelayOf(Duration.standardSeconds(config.getTriggerFrequencySeconds())))
+                        .withLateFirings(AfterPane.elementCountAtLeast(1))
+                )
+                .withAllowedLateness(Duration.standardSeconds(config.getAllowedLatenessSeconds()))
+                .accumulatingFiredPanes();
+        }
+    }
+    
+    private boolean applyFilter(String data, String filterCriteria) {
+        if (filterCriteria == null || filterCriteria.isEmpty()) {
+            return true;
+        }
+        return data.contains(filterCriteria);
+    }
+    
+    // Window processing DoFn
+    private static class WindowProcessor extends DoFn<KV<String, String>, StreamingResult> {
+        private final String pipelineId;
+        private final StreamingRequest request;
+        
+        public WindowProcessor(String pipelineId, StreamingRequest request) {
+            this.pipelineId = pipelineId;
+            this.request = request;
+        }
+        
+        @ProcessElement
+        public void processElement(ProcessContext c, BoundedWindow window) {
+            KV<String, String> element = c.element();
+            
+            StreamingResult result = new StreamingResult();
+            result.setPipelineId(pipelineId);
+            result.setUserId(request.getUserId());
+            result.setSessionId(request.getSessionId());
+            result.setWindowStart(window.start().toInstant());
+            result.setWindowEnd(window.end().toInstant());
+            
+            // Process the individual record
+            String processedData = processRecord(element.getValue(), request);
+            StreamingResult.ProcessedRecord record = new StreamingResult.ProcessedRecord(
+                element.getValue(),
+                processedData,
+                c.timestamp().toInstant(),
+                element.getKey()
+            );
+            
+            result.setRecords(Arrays.asList(record));
+            result.setRecordCount(1);
+            
+            c.output(result);
+        }
+        
+        private String processRecord(String input, StreamingRequest request) {
+            // Add your custom processing logic here
+            return input.toUpperCase() + " [processed at " + java.time.Instant.now() + "]";
+        }
+    }
+    
+    // Window aggregation DoFn
+    private static class WindowAggregator extends DoFn<KV<String, Iterable<StreamingResult>>, StreamingResult> {
+        private final String pipelineId;
+        private final StreamingRequest request;
+        
+        public WindowAggregator(String pipelineId, StreamingRequest request) {
+            this.pipelineId = pipelineId;
+            this.request = request;
+        }
+        
+        @ProcessElement
+        public void processElement(ProcessContext c, BoundedWindow window) {
+            Iterable<StreamingResult> results = c.element().getValue();
+            
+            StreamingResult aggregated = new StreamingResult();
+            aggregated.setPipelineId(pipelineId);
+            aggregated.setUserId(request.getUserId());
+            aggregated.setSessionId(request.getSessionId());
+            aggregated.setWindowStart(window.start().toInstant());
+            aggregated.setWindowEnd(window.end().toInstant());
+            
+            List<StreamingResult.ProcessedRecord> allRecords = new ArrayList<>();
+            long totalCount = 0;
+            
+            for (StreamingResult result : results) {
+                if (result.getRecords() != null) {
+                    allRecords.addAll(result.getRecords());
+                }
+                totalCount += result.getRecordCount();
+            }
+            
+            aggregated.setRecords(allRecords);
+            aggregated.setRecordCount(totalCount);
+            aggregated.setAggregateData(createAggregateData(allRecords));
+            
+            c.output(aggregated);
+        }
+        
+        private String createAggregateData(List<StreamingResult.ProcessedRecord> records) {
+            // Create aggregate statistics
+            return String.format("Window contains %d records, processed at %s", 
+                records.size(), java.time.Instant.now());
+        }
+    }
+}
+
+// ===== Result Publisher Service =====
+
+// src/main/java/com/example/service/ResultPublisher.java
+package com.example.service;
+
+import com.example.model.StreamingResult;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ResultPublisher {
+    private static final Logger logger = LoggerFactory.getLogger(ResultPublisher.class);
+    
+    @Autowired
+    private SimpMessagingTemplate messagingTemplate;
+    
+    @Autowired
+    private RedisTemplate<String, Object> redisTemplate;
+    
+    @Autowired
+    private ObjectMapper objectMapper;
+    
+    public void publishResult(StreamingResult result) {
+        try {
+            // Store in Redis for persistence
+            String key = String.format("result:%s:%s:%d", 
+                result.getPipelineId(), 
+                result.getSessionId(),
+                result.getWindowStart().toEpochMilli());
+            
+            redisTemplate.opsForValue().set(key, result);
+            
+            // Send via WebSocket to connected clients
+            String destination = String.format("/topic/results/%s/%s", 
+                result.getUserId(), result.getSessionId());
+            
+            messagingTemplate.convertAndSend(destination, result);
+            
+            logger.debug("Published result for pipeline: {} window: {} - {} with {} records", 
+                result.getPipelineId(),
+                result.getWindowStart(), 
+                result.getWindowEnd(), 
+                result.getRecordCount());
+                
+        } catch (Exception e) {
+            logger.error("Error publishing result", e);
+        }
+    }
+}
+
+// ===== Streaming Service =====
+
+// src/main/java/com/example/service/StreamingService.java
+package com.example.service;
+
+import com.example.beam.StreamingPipeline;
+import com.example.config.KafkaProperties;
+import com.example.config.StreamingProperties;
+import com.example.model.StreamingRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.Set;
+
+@Service
+public class StreamingService {
+    private static final Logger logger = LoggerFactory.getLogger(StreamingService.class);
+    
+    @Autowired
+    private StreamingPipeline streamingPipeline;
+    
+    @Autowired
+    private KafkaProperties kafkaProperties;
+    
+    @Autowired
+    private StreamingProperties streamingProperties;
+    
+    public String startStreaming(StreamingRequest request) {
+        logger.info("Starting streaming for user: {} on topic: {}", request.getUserId(), request.getTopicName());
+        
+        // Set default window config if not provided
+        if (request.getWindowConfig() == null) {
+            StreamingRequest.WindowConfig defaultConfig = new StreamingRequest.WindowConfig();
+            defaultConfig.setWindowSizeSeconds(streamingProperties.getWindowSizeSeconds());
+            defaultConfig.setAllowedLatenessSeconds(streamingProperties.getAllowedLatenessSeconds());
+            defaultConfig.setTriggerFrequencySeconds(streamingProperties.getTriggerFrequencySeconds());
+            request.setWindowConfig(defaultConfig);
+        }
+        
+        try {
+            String pipelineId = streamingPipeline.startStreamingPipeline(
+                request, 
+                kafkaProperties.getBootstrapServers()
+            );
+            
+            logger.info("Started streaming pipeline: {} for user: {}", pipelineId, request.getUserId());
+            return pipelineId;
+        } catch (Exception e) {
+            logger.error("Failed to start streaming for user: {}", request.getUserId(), e);
+            throw new RuntimeException("Failed to start streaming", e);
+        }
+    }
+    
+    public void stopStreaming(String pipelineId) {
+        logger.info("Stopping streaming pipeline: {}", pipelineId);
+        streamingPipeline.stopStreamingPipeline(pipelineId);
+    }
+    
+    public void stopStreamingForUser(String userId, String topicName) {
+        logger.info("Stopping streaming for user: {} on topic: {}", userId, topicName);
+        streamingPipeline.stopStreamingPipelineForUser(userId, topicName);
+    }
+    
+    public boolean isStreamingActive(String pipelineId) {
+        return streamingPipeline.isPipelineActive(pipelineId);
+    }
+    
+    public Set<String> getActiveStreams() {
+        return streamingPipeline.getActivePipelineIds();
+    }
+}
+
+// ===== WebSocket Configuration =====
+
+// src/main/java/com/example/config/WebSocketConfig.java
+package com.example.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
+import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
+import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
+
+@Configuration
+@EnableWebSocketMessageBroker
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+    
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry config) {
+        config.enableSimpleBroker("/topic");
+        config.setApplicationDestinationPrefixes("/app");
+    }
+    
+    @Override
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        registry.addEndpoint("/ws")
+                .setAllowedOriginPatterns("*")
+                .withSockJS();
+    }
+}
+
+// ===== REST Controller =====
+
+// src/main/java/com/example/controller/StreamingController.java
+package com.example.controller;
+
+import com.example.model.StreamingRequest;
+import com.example.service.StreamingService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import javax.validation.Valid;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/streaming")
+public class StreamingController {
+    private static final Logger logger = LoggerFactory
