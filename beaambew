@@ -1,0 +1,774 @@
+// pom.xml dependencies
+/*
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-core</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-kafka</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-elasticsearch</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+    </dependency>
+</dependencies>
+*/
+
+// 1. Rule Entity and DTOs
+package com.example.rulesengine.model;
+
+import javax.persistence.*;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "search_rules")
+public class SearchRule {
+    @Id
+    private String ruleId;
+    
+    @Column(nullable = false)
+    private String userId;
+    
+    @Column(nullable = false)
+    private String ruleName;
+    
+    @Enumerated(EnumType.STRING)
+    private RuleType type;
+    
+    @Column(columnDefinition = "TEXT")
+    private String conditions; // JSON string
+    
+    @Column(nullable = false)
+    private boolean active = true;
+    
+    @Column(nullable = false)
+    private LocalDateTime createdAt;
+    
+    @Column
+    private LocalDateTime lastExecuted;
+    
+    // Constructors
+    public SearchRule() {}
+    
+    public SearchRule(String ruleId, String userId, String ruleName, 
+                     RuleType type, String conditions) {
+        this.ruleId = ruleId;
+        this.userId = userId;
+        this.ruleName = ruleName;
+        this.type = type;
+        this.conditions = conditions;
+        this.createdAt = LocalDateTime.now();
+    }
+    
+    // Getters and setters
+    public String getRuleId() { return ruleId; }
+    public void setRuleId(String ruleId) { this.ruleId = ruleId; }
+    
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    
+    public String getRuleName() { return ruleName; }
+    public void setRuleName(String ruleName) { this.ruleName = ruleName; }
+    
+    public RuleType getType() { return type; }
+    public void setType(RuleType type) { this.type = type; }
+    
+    public String getConditions() { return conditions; }
+    public void setConditions(String conditions) { this.conditions = conditions; }
+    
+    public boolean isActive() { return active; }
+    public void setActive(boolean active) { this.active = active; }
+    
+    public LocalDateTime getCreatedAt() { return createdAt; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+    
+    public LocalDateTime getLastExecuted() { return lastExecuted; }
+    public void setLastExecuted(LocalDateTime lastExecuted) { this.lastExecuted = lastExecuted; }
+}
+
+enum RuleType {
+    FILTER,
+    AGGREGATION,
+    PATTERN_MATCHING,
+    ANOMALY_DETECTION
+}
+
+// 2. Rule Conditions Classes
+package com.example.rulesengine.model;
+
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import java.util.List;
+import java.util.Map;
+
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
+@JsonSubTypes({
+    @JsonSubTypes.Type(value = FilterCondition.class, name = "filter"),
+    @JsonSubTypes.Type(value = AggregationCondition.class, name = "aggregation"),
+    @JsonSubTypes.Type(value = PatternCondition.class, name = "pattern")
+})
+public abstract class RuleCondition {
+    protected String type;
+    
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+    
+    public abstract boolean matches(Map<String, Object> data);
+}
+
+class FilterCondition extends RuleCondition {
+    private String field;
+    private String operator; // eq, gt, lt, contains, etc.
+    private Object value;
+    
+    public FilterCondition() {
+        this.type = "filter";
+    }
+    
+    @Override
+    public boolean matches(Map<String, Object> data) {
+        Object fieldValue = data.get(field);
+        if (fieldValue == null) return false;
+        
+        switch (operator.toLowerCase()) {
+            case "eq":
+                return fieldValue.equals(value);
+            case "gt":
+                return ((Comparable) fieldValue).compareTo(value) > 0;
+            case "lt":
+                return ((Comparable) fieldValue).compareTo(value) < 0;
+            case "contains":
+                return fieldValue.toString().contains(value.toString());
+            default:
+                return false;
+        }
+    }
+    
+    // Getters and setters
+    public String getField() { return field; }
+    public void setField(String field) { this.field = field; }
+    
+    public String getOperator() { return operator; }
+    public void setOperator(String operator) { this.operator = operator; }
+    
+    public Object getValue() { return value; }
+    public void setValue(Object value) { this.value = value; }
+}
+
+class AggregationCondition extends RuleCondition {
+    private String field;
+    private String aggregationType; // sum, count, avg, max, min
+    private String windowType; // fixed, sliding
+    private int windowSizeMinutes;
+    private double threshold;
+    
+    public AggregationCondition() {
+        this.type = "aggregation";
+    }
+    
+    @Override
+    public boolean matches(Map<String, Object> data) {
+        // This would be handled differently in the pipeline with windowing
+        return true; // Simplified for example
+    }
+    
+    // Getters and setters
+    public String getField() { return field; }
+    public void setField(String field) { this.field = field; }
+    
+    public String getAggregationType() { return aggregationType; }
+    public void setAggregationType(String aggregationType) { this.aggregationType = aggregationType; }
+    
+    public String getWindowType() { return windowType; }
+    public void setWindowType(String windowType) { this.windowType = windowType; }
+    
+    public int getWindowSizeMinutes() { return windowSizeMinutes; }
+    public void setWindowSizeMinutes(int windowSizeMinutes) { this.windowSizeMinutes = windowSizeMinutes; }
+    
+    public double getThreshold() { return threshold; }
+    public void setThreshold(double threshold) { this.threshold = threshold; }
+}
+
+class PatternCondition extends RuleCondition {
+    private List<String> sequence;
+    private int timeWindowMinutes;
+    
+    public PatternCondition() {
+        this.type = "pattern";
+    }
+    
+    @Override
+    public boolean matches(Map<String, Object> data) {
+        // Pattern matching logic would be more complex
+        return true; // Simplified for example
+    }
+    
+    // Getters and setters
+    public List<String> getSequence() { return sequence; }
+    public void setSequence(List<String> sequence) { this.sequence = sequence; }
+    
+    public int getTimeWindowMinutes() { return timeWindowMinutes; }
+    public void setTimeWindowMinutes(int timeWindowMinutes) { this.timeWindowMinutes = timeWindowMinutes; }
+}
+
+// 3. Repository and Service Layer
+package com.example.rulesengine.repository;
+
+import com.example.rulesengine.model.SearchRule;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import java.util.List;
+
+public interface SearchRuleRepository extends JpaRepository<SearchRule, String> {
+    List<SearchRule> findByActiveTrue();
+    List<SearchRule> findByUserIdAndActiveTrue(String userId);
+    
+    @Query("SELECT r FROM SearchRule r WHERE r.active = true AND r.lastExecuted < :threshold")
+    List<SearchRule> findStaleRules(java.time.LocalDateTime threshold);
+}
+
+package com.example.rulesengine.service;
+
+import com.example.rulesengine.model.*;
+import com.example.rulesengine.repository.SearchRuleRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.stereotype.Service;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+@Service
+public class RuleProcessingService {
+    
+    @Autowired
+    private SearchRuleRepository ruleRepository;
+    
+    @Autowired
+    private RedisTemplate<String, String> redisTemplate;
+    
+    @Autowired
+    private BeamPipelineManager pipelineManager;
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private static final String RULES_CACHE_KEY = "active_rules";
+    
+    public CompletableFuture<String> createRule(String userId, String ruleName, 
+                                               RuleType type, RuleCondition condition) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                String ruleId = UUID.randomUUID().toString();
+                String conditionsJson = objectMapper.writeValueAsString(condition);
+                
+                SearchRule rule = new SearchRule(ruleId, userId, ruleName, type, conditionsJson);
+                ruleRepository.save(rule);
+                
+                // Update cache
+                updateRulesCache();
+                
+                return ruleId;
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to create rule", e);
+            }
+        });
+    }
+    
+    public CompletableFuture<Void> updateRule(String ruleId, RuleCondition condition) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                SearchRule rule = ruleRepository.findById(ruleId)
+                    .orElseThrow(() -> new RuntimeException("Rule not found"));
+                
+                String conditionsJson = objectMapper.writeValueAsString(condition);
+                rule.setConditions(conditionsJson);
+                ruleRepository.save(rule);
+                
+                // Update cache
+                updateRulesCache();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to update rule", e);
+            }
+        });
+    }
+    
+    public CompletableFuture<Void> deleteRule(String ruleId) {
+        return CompletableFuture.runAsync(() -> {
+            SearchRule rule = ruleRepository.findById(ruleId)
+                .orElseThrow(() -> new RuntimeException("Rule not found"));
+            
+            rule.setActive(false);
+            ruleRepository.save(rule);
+            
+            // Update cache
+            updateRulesCache();
+        });
+    }
+    
+    public List<SearchRule> getUserRules(String userId) {
+        return ruleRepository.findByUserIdAndActiveTrue(userId);
+    }
+    
+    private void updateRulesCache() {
+        try {
+            List<SearchRule> activeRules = ruleRepository.findByActiveTrue();
+            String rulesJson = objectMapper.writeValueAsString(activeRules);
+            redisTemplate.opsForValue().set(RULES_CACHE_KEY, rulesJson);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to update rules cache", e);
+        }
+    }
+    
+    public void startPipelineIfNotRunning() {
+        pipelineManager.startStreamingPipeline();
+    }
+}
+
+// 4. Apache Beam Pipeline Components
+package com.example.rulesengine.beam;
+
+import com.example.rulesengine.model.*;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.io.kafka.KafkaIO;
+import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO;
+import org.apache.beam.sdk.options.*;
+import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.transforms.windowing.*;
+import org.apache.beam.sdk.values.*;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.joda.time.Duration;
+import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+
+import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
+
+public interface StreamingPipelineOptions extends PipelineOptions {
+    @Description("Kafka bootstrap servers")
+    @Default.String("localhost:9092")
+    String getKafkaBootstrapServers();
+    void setKafkaBootstrapServers(String value);
+
+    @Description("Kafka topic to read from")
+    @Default.String("data-stream")
+    String getKafkaTopic();
+    void setKafkaTopic(String value);
+
+    @Description("Redis host")
+    @Default.String("localhost")
+    String getRedisHost();
+    void setRedisHost(String value);
+
+    @Description("Redis port")
+    @Default.Integer(6379)
+    Integer getRedisPort();
+    void setRedisPort(Integer value);
+
+    @Description("Elasticsearch URLs")
+    @Default.String("http://localhost:9200")
+    String getElasticsearchUrls();
+    void setElasticsearchUrls(String value);
+}
+
+class RuleProcessor extends DoFn<KV<String, String>, ProcessedResult> {
+    
+    private transient RedisTemplate<String, String> redisTemplate;
+    private transient ObjectMapper objectMapper;
+    private transient List<SearchRule> cachedRules;
+    private long lastCacheUpdate = 0;
+    private static final long CACHE_REFRESH_INTERVAL = 60000; // 1 minute
+    
+    @Setup
+    public void setup() {
+        // Initialize Redis connection
+        JedisConnectionFactory jedisConnectionFactory = new JedisConnectionFactory();
+        jedisConnectionFactory.setHostName("localhost"); // Should be injected
+        jedisConnectionFactory.setPort(6379);
+        jedisConnectionFactory.afterPropertiesSet();
+        
+        redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(jedisConnectionFactory);
+        redisTemplate.setKeySerializer(new StringRedisSerializer());
+        redisTemplate.setValueSerializer(new StringRedisSerializer());
+        redisTemplate.afterPropertiesSet();
+        
+        objectMapper = new ObjectMapper();
+        cachedRules = new ArrayList<>();
+    }
+    
+    @ProcessElement
+    public void processElement(ProcessContext context) {
+        try {
+            // Refresh rules cache if needed
+            if (System.currentTimeMillis() - lastCacheUpdate > CACHE_REFRESH_INTERVAL) {
+                refreshRulesCache();
+            }
+            
+            KV<String, String> element = context.element();
+            String messageJson = element.getValue();
+            
+            // Parse the incoming data
+            Map<String, Object> data = objectMapper.readValue(messageJson, 
+                new TypeReference<Map<String, Object>>() {});
+            
+            // Apply all active rules to this data
+            for (SearchRule rule : cachedRules) {
+                try {
+                    RuleCondition condition = objectMapper.readValue(
+                        rule.getConditions(), RuleCondition.class);
+                    
+                    if (condition.matches(data)) {
+                        ProcessedResult result = new ProcessedResult(
+                            rule.getRuleId(),
+                            rule.getUserId(),
+                            rule.getRuleName(),
+                            data,
+                            System.currentTimeMillis()
+                        );
+                        
+                        context.output(result);
+                    }
+                } catch (Exception e) {
+                    // Log rule processing error but continue with other rules
+                    System.err.println("Error processing rule " + rule.getRuleId() + ": " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            // Log error but don't fail the pipeline
+            System.err.println("Error processing element: " + e.getMessage());
+        }
+    }
+    
+    private void refreshRulesCache() {
+        try {
+            String rulesJson = redisTemplate.opsForValue().get("active_rules");
+            if (rulesJson != null) {
+                List<SearchRule> rules = objectMapper.readValue(rulesJson, 
+                    new TypeReference<List<SearchRule>>() {});
+                cachedRules = rules;
+                lastCacheUpdate = System.currentTimeMillis();
+            }
+        } catch (Exception e) {
+            System.err.println("Error refreshing rules cache: " + e.getMessage());
+        }
+    }
+}
+
+class ProcessedResult {
+    private String ruleId;
+    private String userId;
+    private String ruleName;
+    private Map<String, Object> data;
+    private long timestamp;
+    private String id; // For Elasticsearch
+    
+    public ProcessedResult() {}
+    
+    public ProcessedResult(String ruleId, String userId, String ruleName, 
+                          Map<String, Object> data, long timestamp) {
+        this.ruleId = ruleId;
+        this.userId = userId;
+        this.ruleName = ruleName;
+        this.data = data;
+        this.timestamp = timestamp;
+        this.id = UUID.randomUUID().toString();
+    }
+    
+    // Getters and setters
+    public String getRuleId() { return ruleId; }
+    public void setRuleId(String ruleId) { this.ruleId = ruleId; }
+    
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    
+    public String getRuleName() { return ruleName; }
+    public void setRuleName(String ruleName) { this.ruleName = ruleName; }
+    
+    public Map<String, Object> getData() { return data; }
+    public void setData(Map<String, Object> data) { this.data = data; }
+    
+    public long getTimestamp() { return timestamp; }
+    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+    
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+}
+
+// 5. Pipeline Manager
+package com.example.rulesengine.service;
+
+import com.example.rulesengine.beam.*;
+import org.apache.beam.runners.dataflow.DataflowRunner;
+import org.apache.beam.runners.direct.DirectRunner;
+import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO;
+import org.apache.beam.sdk.io.kafka.KafkaIO;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.Window;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.joda.time.Duration;
+import org.springframework.stereotype.Service;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+@Service
+public class BeamPipelineManager {
+    
+    private final AtomicBoolean pipelineRunning = new AtomicBoolean(false);
+    private Pipeline currentPipeline;
+    
+    public CompletableFuture<Void> startStreamingPipeline() {
+        if (pipelineRunning.compareAndSet(false, true)) {
+            return CompletableFuture.runAsync(this::runPipeline);
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+    
+    private void runPipeline() {
+        try {
+            StreamingPipelineOptions options = PipelineOptionsFactory
+                .as(StreamingPipelineOptions.class);
+            
+            // Use DirectRunner for local development, DataflowRunner for production
+            options.setRunner(DirectRunner.class);
+            options.setStreaming(true);
+            
+            currentPipeline = Pipeline.create(options);
+            
+            // Read from Kafka
+            PCollection<KV<String, String>> kafkaData = currentPipeline
+                .apply("Read from Kafka", KafkaIO.<String, String>read()
+                    .withBootstrapServers(options.getKafkaBootstrapServers())
+                    .withTopic(options.getKafkaTopic())
+                    .withKeyDeserializer(StringDeserializer.class)
+                    .withValueDeserializer(StringDeserializer.class)
+                    .withoutMetadata());
+            
+            // Process data with rules
+            PCollection<ProcessedResult> processedResults = kafkaData
+                .apply("Apply Rules", ParDo.of(new RuleProcessor()));
+            
+            // Window the results for aggregations (if needed)
+            PCollection<ProcessedResult> windowedResults = processedResults
+                .apply("Fixed Window", Window.<ProcessedResult>into(
+                    FixedWindows.of(Duration.standardMinutes(1))));
+            
+            // Write to Elasticsearch
+            windowedResults.apply("Write to Elasticsearch", 
+                ElasticsearchIO.write()
+                    .withConnectionConfiguration(
+                        ElasticsearchIO.ConnectionConfiguration.create(
+                            new String[]{options.getElasticsearchUrls()},
+                            "search-results", // index name
+                            "_doc" // document type
+                        ))
+                    .withIdFn(result -> result.getId()));
+            
+            // Run the pipeline
+            currentPipeline.run().waitUntilFinish();
+            
+        } catch (Exception e) {
+            System.err.println("Pipeline execution failed: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            pipelineRunning.set(false);
+        }
+    }
+    
+    public void stopPipeline() {
+        if (currentPipeline != null) {
+            try {
+                currentPipeline.cancel();
+            } catch (Exception e) {
+                System.err.println("Error stopping pipeline: " + e.getMessage());
+            }
+        }
+        pipelineRunning.set(false);
+    }
+    
+    public boolean isPipelineRunning() {
+        return pipelineRunning.get();
+    }
+}
+
+// 6. REST Controller
+package com.example.rulesengine.controller;
+
+import com.example.rulesengine.model.*;
+import com.example.rulesengine.service.RuleProcessingService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+@RestController
+@RequestMapping("/api/rules")
+public class RuleController {
+    
+    @Autowired
+    private RuleProcessingService ruleProcessingService;
+    
+    @PostMapping
+    public CompletableFuture<ResponseEntity<String>> createRule(
+            @RequestBody CreateRuleRequest request) {
+        
+        return ruleProcessingService.createRule(
+                request.getUserId(),
+                request.getRuleName(),
+                request.getType(),
+                request.getCondition()
+            ).thenApply(ruleId -> ResponseEntity.ok(ruleId));
+    }
+    
+    @PutMapping("/{ruleId}")
+    public CompletableFuture<ResponseEntity<Void>> updateRule(
+            @PathVariable String ruleId,
+            @RequestBody UpdateRuleRequest request) {
+        
+        return ruleProcessingService.updateRule(ruleId, request.getCondition())
+            .thenApply(v -> ResponseEntity.ok().build());
+    }
+    
+    @DeleteMapping("/{ruleId}")
+    public CompletableFuture<ResponseEntity<Void>> deleteRule(@PathVariable String ruleId) {
+        return ruleProcessingService.deleteRule(ruleId)
+            .thenApply(v -> ResponseEntity.ok().build());
+    }
+    
+    @GetMapping("/user/{userId}")
+    public ResponseEntity<List<SearchRule>> getUserRules(@PathVariable String userId) {
+        List<SearchRule> rules = ruleProcessingService.getUserRules(userId);
+        return ResponseEntity.ok(rules);
+    }
+    
+    @PostMapping("/pipeline/start")
+    public ResponseEntity<String> startPipeline() {
+        ruleProcessingService.startPipelineIfNotRunning();
+        return ResponseEntity.ok("Pipeline start initiated");
+    }
+    
+    // DTOs for requests
+    public static class CreateRuleRequest {
+        private String userId;
+        private String ruleName;
+        private RuleType type;
+        private RuleCondition condition;
+        
+        // Getters and setters
+        public String getUserId() { return userId; }
+        public void setUserId(String userId) { this.userId = userId; }
+        
+        public String getRuleName() { return ruleName; }
+        public void setRuleName(String ruleName) { this.ruleName = ruleName; }
+        
+        public RuleType getType() { return type; }
+        public void setType(RuleType type) { this.type = type; }
+        
+        public RuleCondition getCondition() { return condition; }
+        public void setCondition(RuleCondition condition) { this.condition = condition; }
+    }
+    
+    public static class UpdateRuleRequest {
+        private RuleCondition condition;
+        
+        public RuleCondition getCondition() { return condition; }
+        public void setCondition(RuleCondition condition) { this.condition = condition; }
+    }
+}
+
+// 7. Application Configuration
+package com.example.rulesengine.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+
+@Configuration
+public class RedisConfig {
+    
+    @Bean
+    public RedisConnectionFactory redisConnectionFactory() {
+        JedisConnectionFactory factory = new JedisConnectionFactory();
+        factory.setHostName("localhost");
+        factory.setPort(6379);
+        factory.setUsePool(true);
+        return factory;
+    }
+    
+    @Bean
+    public RedisTemplate<String, String> redisTemplate(RedisConnectionFactory connectionFactory) {
+        RedisTemplate<String, String> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(new StringRedisSerializer());
+        template.afterPropertiesSet();
+        return template;
+    }
+}
+
+// 8. Main Application Class
+package com.example.rulesengine;
+
+import com.example.rulesengine.service.RuleProcessingService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class RulesEngineApplication implements CommandLineRunner {
+    
+    @Autowired
+    private RuleProcessingService ruleProcessingService;
+    
+    public static void main(String[] args) {
+        SpringApplication.run(RulesEngineApplication.class, args);
+    }
+    
+    @Override
+    public void run(String... args) throws Exception {
+        // Start the streaming pipeline when the application starts
+        ruleProcessingService.startPipelineIfNotRunning();
+    }
+}
