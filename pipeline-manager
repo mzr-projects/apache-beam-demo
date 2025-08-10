@@ -1,0 +1,477 @@
+Below is a minimal, production-minded blueprint for what you described: a Spring Boot REST API that starts an Apache Beam streaming pipeline which reads from a Kafka topic, processes the stream, and writes to another Kafka topic.
+
+High-level approach
+-  Spring Boot app exposes REST endpoints to start/stop/check status of a Beam pipeline.
+-  The Beam pipeline:
+  - source: Kafka topic (streaming)
+  - processing: example map/transform (you can plug in your logic)
+  - sink: Kafka topic (output)
+-  Local/dev: DirectRunner for quick testing.
+-  Production: Flink/Spark/Dataflow runner recommended for robust streaming.
+
+Project structure
+-  Single Maven module (simple to start). You can split later if you want independent lifecycle for the pipeline vs API.
+
+Dependencies (Maven)
+Use aligned Beam artifacts via a single property beam.version to avoid mismatches.
+
+```xml
+<!-- pom.xml -->
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>beam-spring-kafka</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <name>beam-spring-kafka</name>
+  <properties>
+    <java.version>17</java.version>
+    <spring-boot.version>3.3.2</spring-boot.version>
+    <beam.version>2.54.0</beam.version> <!-- pick a recent Beam; keep consistent -->
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Spring Web -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- Apache Beam core + Kafka IO + Direct runner (for local testing) -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-core</artifactId>
+      <version>${beam.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-io-kafka</artifactId>
+      <version>${beam.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-direct-java</artifactId>
+      <version>${beam.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Optional: Flink runner (for production); choose the artifact that matches your Flink -->
+    <!--
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-flink-1.16</artifactId>
+      <version>${beam.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+    -->
+
+    <!-- Logging -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-log4j2</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Spring Boot executable jar -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>
+              <groupId>org.apache.logging.log4j</groupId>
+              <artifactId>log4j-to-slf4j</artifactId>
+            </exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+```
+
+Application properties
+```yaml
+# src/main/resources/application.yml
+server:
+  port: 8080
+
+kafka:
+  bootstrapServers: localhost:9092
+  inputTopic: input-events
+  outputTopic: output-events
+
+beam:
+  runner: DirectRunner  # DirectRunner for dev; use FlinkRunner / DataflowRunner / SparkRunner in prod
+```
+
+Pipeline options interface
+```java
+// src/main/java/com/example/beam/BeamKafkaOptions.java
+package com.example.beam;
+
+import org.apache.beam.sdk.options.Description;
+import org.apache.beam.sdk.options.Validation;
+import org.apache.beam.sdk.options.StreamingOptions;
+
+public interface BeamKafkaOptions extends StreamingOptions {
+  @Description("Kafka bootstrap servers host:port")
+  @Validation.Required
+  String getBootstrapServers();
+  void setBootstrapServers(String value);
+
+  @Description("Input Kafka topic")
+  @Validation.Required
+  String getInputTopic();
+  void setInputTopic(String value);
+
+  @Description("Output Kafka topic")
+  @Validation.Required
+  String getOutputTopic();
+  void setOutputTopic(String value);
+}
+```
+
+Spring Boot main
+```java
+// src/main/java/com/example/Application.java
+package com.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class Application {
+  public static void main(String[] args) {
+    SpringApplication.run(Application.class, args);
+  }
+}
+```
+
+Pipeline builder
+```java
+// src/main/java/com/example/beam/KafkaStreamingPipeline.java
+package com.example.beam;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.TypeDescriptors;
+import org.apache.beam.sdk.transforms.MapElements;
+import org.apache.beam.sdk.io.kafka.KafkaIO;
+import org.apache.beam.sdk.PipelineResult;
+
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.producer.ProducerConfig;
+
+public class KafkaStreamingPipeline {
+
+  public static PipelineResult start(BeamKafkaOptions opts) {
+    // Ensure streaming is enabled
+    opts.setStreaming(true);
+
+    // Build pipeline
+    Pipeline p = Pipeline.create(opts);
+
+    // Optional Kafka configs (earliest read, idempotent producer)
+    Map<String, Object> consumerConfig = new HashMap<>();
+    consumerConfig.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    // Note: KafkaIO manages offsets via Beam; group.id is not used as in regular consumers.
+
+    Map<String, Object> producerConfig = new HashMap<>();
+    producerConfig.put(ProducerConfig.ACKS_CONFIG, "all");
+    producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+
+    // Read from Kafka as KV<String, String>
+    var input = p.apply("ReadFromKafka",
+        KafkaIO.<String, String>read()
+            .withBootstrapServers(opts.getBootstrapServers())
+            .withTopics(Collections.singletonList(opts.getInputTopic()))
+            .withKeyDeserializer(StringDeserializer.class)
+            .withValueDeserializer(StringDeserializer.class)
+            .withConsumerConfigUpdates(consumerConfig)
+            .withoutMetadata() // produces PCollection<KV<K,V>>
+    );
+
+    // Example processing: uppercase the value (replace with your logic)
+    var processed =
+        input.apply("UppercaseValues",
+            MapElements.into(
+                TypeDescriptors.kvs(TypeDescriptors.strings(), TypeDescriptors.strings()))
+                .via(kv -> KV.of(kv.getKey(), kv.getValue() == null ? null : kv.getValue().toUpperCase()))
+        );
+
+    // Write to Kafka
+    processed.apply("WriteToKafka",
+        KafkaIO.<String, String>write()
+            .withBootstrapServers(opts.getBootstrapServers())
+            .withTopic(opts.getOutputTopic())
+            .withKeySerializer(StringSerializer.class)
+            .withValueSerializer(StringSerializer.class)
+            .withProducerConfigUpdates(producerConfig)
+    );
+
+    // Run async (do not wait here; REST thread returns immediately)
+    return p.run();
+  }
+}
+```
+
+Pipeline manager service
+```java
+// src/main/java/com/example/service/PipelineManager.java
+package com.example.service;
+
+import com.example.beam.BeamKafkaOptions;
+import com.example.beam.KafkaStreamingPipeline;
+
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.beam.runners.direct.DirectRunner;
+import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PipelineManager {
+
+  private final String defaultBootstrap;
+  private final String defaultInputTopic;
+  private final String defaultOutputTopic;
+  private final String defaultRunner;
+
+  private final AtomicReference<PipelineResult> current = new AtomicReference<>(null);
+
+  public PipelineManager(
+      @Value("${kafka.bootstrapServers}") String bootstrap,
+      @Value("${kafka.inputTopic}") String inputTopic,
+      @Value("${kafka.outputTopic}") String outputTopic,
+      @Value("${beam.runner:DirectRunner}") String runner) {
+    this.defaultBootstrap = bootstrap;
+    this.defaultInputTopic = inputTopic;
+    this.defaultOutputTopic = outputTopic;
+    this.defaultRunner = runner;
+  }
+
+  public synchronized String start(String bootstrap, String inputTopic, String outputTopic, String runner) {
+    if (current.get() != null && isRunning(current.get())) {
+      return "Pipeline already running";
+    }
+
+    BeamKafkaOptions opts = PipelineOptionsFactory.as(BeamKafkaOptions.class);
+    opts.setBootstrapServers(bootstrap != null ? bootstrap : defaultBootstrap);
+    opts.setInputTopic(inputTopic != null ? inputTopic : defaultInputTopic);
+    opts.setOutputTopic(outputTopic != null ? outputTopic : defaultOutputTopic);
+
+    // Choose runner
+    String r = runner != null ? runner : defaultRunner;
+    switch (r) {
+      case "DirectRunner" -> opts.setRunner(DirectRunner.class);
+      // For Flink: add the Flink runner dependency and uncomment:
+      // case "FlinkRunner" -> opts.setRunner(org.apache.beam.runners.flink.FlinkRunner.class);
+      // For Dataflow or Spark, set appropriate classes and options.
+      default -> opts.setRunner(DirectRunner.class);
+    }
+
+    PipelineResult result = KafkaStreamingPipeline.start(opts);
+    current.set(result);
+    return "Started";
+  }
+
+  public synchronized String stop() {
+    PipelineResult pr = current.get();
+    if (pr == null) return "No pipeline";
+    try {
+      pr.cancel();
+      current.set(null);
+      return "Cancelled";
+    } catch (UnsupportedOperationException ex) {
+      // Some runners may not support cancel the same way
+      current.set(null);
+      return "Cancel not supported by runner; cleared reference";
+    } catch (Exception e) {
+      return "Error cancelling: " + e.getMessage();
+    }
+  }
+
+  public String status() {
+    PipelineResult pr = current.get();
+    if (pr == null) return "Not running";
+    try {
+      return String.valueOf(pr.getState());
+    } catch (Exception e) {
+      return "Unknown (error: " + e.getMessage() + ")";
+    }
+  }
+
+  private boolean isRunning(PipelineResult pr) {
+    try {
+      var st = pr.getState();
+      return st == PipelineResult.State.RUNNING || st == PipelineResult.State.UNKNOWN;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+}
+```
+
+REST controller
+```java
+// src/main/java/com/example/api/PipelineController.java
+package com.example.api;
+
+import com.example.service.PipelineManager;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/pipelines")
+public class PipelineController {
+
+  private final PipelineManager manager;
+
+  public PipelineController(PipelineManager manager) {
+    this.manager = manager;
+  }
+
+  public static record StartRequest(
+      String bootstrapServers,
+      String inputTopic,
+      String outputTopic,
+      String runner // "DirectRunner", "FlinkRunner", etc.
+  ) {}
+
+  @PostMapping("/start")
+  public ResponseEntity<String> start(@RequestBody(required = false) StartRequest req) {
+    String msg = manager.start(
+        req != null ? req.bootstrapServers() : null,
+        req != null ? req.inputTopic() : null,
+        req != null ? req.outputTopic() : null,
+        req != null ? req.runner() : null
+    );
+    return ResponseEntity.accepted().body(msg);
+  }
+
+  @PostMapping("/stop")
+  public ResponseEntity<String> stop() {
+    return ResponseEntity.ok(manager.stop());
+  }
+
+  @GetMapping("/status")
+  public ResponseEntity<String> status() {
+    return ResponseEntity.ok(manager.status());
+  }
+}
+```
+
+Local Kafka (Docker Compose)
+This uses Kafka in KRaft mode (no Zookeeper) for convenience.
+
+```yaml
+# docker-compose.yml
+version: "3.8"
+services:
+  kafka:
+    image: bitnami/kafka:latest
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+      - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+    ports:
+      - "9092:9092"
+```
+
+How to run locally
+1) Start Kafka
+-  docker compose up -d
+
+2) Create topics (example)
+-  kafka-topics.sh --bootstrap-server localhost:9092 --create --topic input-events --partitions 1 --replication-factor 1
+-  kafka-topics.sh --bootstrap-server localhost:9092 --create --topic output-events --partitions 1 --replication-factor 1
+
+3) Build and run the app
+-  mvn spring-boot:run
+
+4) Start the pipeline via REST
+-  curl -X POST http://localhost:8080/pipelines/start
+-  Optional with overrides:
+  curl -X POST http://localhost:8080/pipelines/start -H "Content-Type: application/json" -d '{"bootstrapServers":"localhost:9092","inputTopic":"input-events","outputTopic":"output-events","runner":"DirectRunner"}'
+
+5) Produce test data
+-  kafka-console-producer.sh --bootstrap-server localhost:9092 --topic input-events
+-  Type: hello world
+
+6) Consume output
+-  kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic output-events --from-beginning
+
+7) Check status / stop
+-  curl http://localhost:8080/pipelines/status
+-  curl -X POST http://localhost:8080/pipelines/stop
+
+Notes for production runners
+-  FlinkRunner or SparkRunner is recommended for real streaming workloads. The DirectRunner is for local dev/testing.
+-  Flink:
+  - Add the correct Beam Flink runner dependency matching your Flink version (e.g., beam-runners-flink-1.16).
+  - Run on a Flink cluster; either submit a fat JAR or use the PortableRunner with a Job Server.
+  - Configure checkpointing and resources appropriately.
+-  Spark:
+  - Use beam-runners-spark artifact aligned with your Spark version.
+-  Dataflow:
+  - Use DataflowRunner and set required GCP options (project, region, tempLocation, etc.).
+
+Graceful shutdown and lifecycle
+-  The example exposes /stop which calls PipelineResult.cancel(). Some runners have different semantics; ensure your chosen runner supports cancellation as you expect.
+-  Consider running the pipeline as a separate service/process from the REST API for stronger isolation in production.
+
+Schema/serialization notes
+-  The example uses String keys/values. For Avro/JSON/Protobuf, add the appropriate coders/serde and transforms.
+-  If you only use message values, you can use KafkaIO.readStrings() and KafkaIO.writeRecords(...) accordingly.
+
+Windowing, triggers, and aggregations
+-  The sample is stateless. For aggregations:
+  - Add windowing and stateful transforms, e.g.:
+    - apply Window.into(FixedWindows.of(Duration.standardSeconds(30)))
+    - combine transforms, state/timers, etc.
+  - Choose your runner to support checkpoints and recovery guarantees.
+
+API summary
+
+| Endpoint | Method | Body | Description |
+|---|---|---|---|
+| /pipelines/start | POST | Optional JSON: {bootstrapServers, inputTopic, outputTopic, runner} | Starts the streaming pipeline |
+| /pipelines/stop | POST | — | Cancels the running pipeline |
+| /pipelines/status | GET | — | Returns pipeline state |
+
+If you want, I can adapt this template to:
+-  Kotlin instead of Java
+-  FlinkRunner with a working Gradle/Maven profile
+-  A sample transform (e.g., JSON parsing + filtering + key-by + count per fixed window)
+
