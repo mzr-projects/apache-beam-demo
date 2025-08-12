@@ -1,0 +1,633 @@
+Great question! Let me show you how to run this Apache Beam pipeline on Apache Flink for production-scale processing. Flink provides better performance, fault tolerance, and scalability compared to the DirectRunner.
+
+## 1. Maven Dependencies Update
+
+First, update your `pom.xml` to include Flink runner dependencies:
+
+```xml
+<properties>
+    <beam.version>2.51.0</beam.version>
+    <flink.version>1.17.1</flink.version>
+    <scala.binary.version>2.12</scala.binary.version>
+</properties>
+
+<dependencies>
+    <!-- Apache Beam Core -->
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-core</artifactId>
+        <version>${beam.version}</version>
+    </dependency>
+    
+    <!-- Flink Runner -->
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-runners-flink-1.17</artifactId>
+        <version>${beam.version}</version>
+    </dependency>
+    
+    <!-- Flink Dependencies -->
+    <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-clients</artifactId>
+        <version>${flink.version}</version>
+    </dependency>
+    
+    <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-streaming-java</artifactId>
+        <version>${flink.version}</version>
+    </dependency>
+    
+    <!-- Kafka Connector for Flink -->
+    <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-connector-kafka</artifactId>
+        <version>${flink.version}</version>
+    </dependency>
+    
+    <!-- Elasticsearch Connector -->
+    <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-connector-elasticsearch7</artifactId>
+        <version>${flink.version}</version>
+    </dependency>
+</dependencies>
+```
+
+## 2. Flink Pipeline Configuration
+
+```java
+@Service
+@Slf4j
+public class FlinkPipelineService {
+    
+    @Value("${flink.master:localhost:8081}")
+    private String flinkMaster;
+    
+    @Value("${flink.parallelism:4}")
+    private int parallelism;
+    
+    @Value("${flink.checkpoint.interval:60000}")
+    private long checkpointInterval;
+    
+    @Value("${flink.checkpoint.path}")
+    private String checkpointPath;
+    
+    public String startFlinkPipeline(PipelineRequest request) {
+        String pipelineId = UUID.randomUUID().toString();
+        
+        // Create Flink-specific options
+        FlinkPipelineOptions options = createFlinkOptions(pipelineId);
+        
+        // Build and run pipeline
+        Pipeline pipeline = buildPipeline(options, request);
+        
+        // Submit to Flink cluster
+        PipelineResult result = pipeline.run();
+        
+        log.info("Pipeline {} submitted to Flink with job ID: {}", 
+                 pipelineId, result.metrics());
+        
+        return pipelineId;
+    }
+    
+    private FlinkPipelineOptions createFlinkOptions(String pipelineId) {
+        FlinkPipelineOptions options = PipelineOptionsFactory.as(FlinkPipelineOptions.class);
+        
+        // Set Flink Runner
+        options.setRunner(FlinkRunner.class);
+        
+        // Flink Master URL (for remote cluster)
+        options.setFlinkMaster(flinkMaster);
+        
+        // Job name
+        options.setJobName("beam-pipeline-" + pipelineId);
+        
+        // Parallelism
+        options.setParallelism(parallelism);
+        
+        // Checkpointing for fault tolerance
+        options.setCheckpointingInterval(checkpointInterval);
+        options.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+        options.setCheckpointTimeoutMillis(60000L);
+        options.setMinPauseBetweenCheckpoints(5000L);
+        options.setFailOnCheckpointingErrors(false);
+        
+        // State backend configuration
+        options.setStateBackend("rocksdb");
+        options.setStateBackendStoragePath(checkpointPath);
+        
+        // Enable metrics
+        options.setEnableMetrics(true);
+        
+        // Execution mode
+        options.setStreaming(true);
+        
+        // Auto watermark interval
+        options.setAutoWatermarkInterval(200L);
+        
+        // Network buffer timeout
+        options.setBufferTimeout(100L);
+        
+        // Maximum parallelism for rescaling
+        options.setMaxParallelism(128);
+        
+        return options;
+    }
+}
+```
+
+## 3. Enhanced Pipeline with Flink-Specific Features
+
+```java
+public class FlinkOptimizedPipeline {
+    
+    public Pipeline buildPipeline(FlinkPipelineOptions options, PipelineRequest request) {
+        Pipeline pipeline = Pipeline.create(options);
+        
+        // Configure Kafka source with Flink-specific optimizations
+        PCollection<KafkaRecord<String, String>> kafkaMessages = pipeline
+            .apply("ReadFromKafka", KafkaIO.<String, String>read()
+                .withBootstrapServers(kafkaBootstrapServers)
+                .withTopic(request.getKafkaTopic())
+                .withKeyDeserializer(StringDeserializer.class)
+                .withValueDeserializer(StringDeserializer.class)
+                .withConsumerConfigUpdates(ImmutableMap.of(
+                    "group.id", "flink-beam-" + request.getPipelineId(),
+                    "auto.offset.reset", "latest",
+                    "enable.auto.commit", "false",
+                    "session.timeout.ms", "30000",
+                    "max.poll.records", "1000",
+                    "fetch.min.bytes", "1024",
+                    "fetch.max.wait.ms", "500"
+                ))
+                .withReadCommitted()
+                .withTimestampPolicyFactory(
+                    (tp, previousWatermark) -> new CustomTimestampPolicy())
+                .commitOffsetsInFinalize());
+        
+        // Apply windowing for streaming aggregations
+        PCollection<InputData> windowedData = kafkaMessages
+            .apply("ExtractValues", MapElements
+                .into(TypeDescriptor.of(InputData.class))
+                .via(record -> parseKafkaMessage(record.getKV().getValue())))
+            .apply("ApplyWindowing", Window.<InputData>into(
+                FixedWindows.of(Duration.standardSeconds(30)))
+                .triggering(
+                    AfterWatermark.pastEndOfWindow()
+                        .withEarlyFirings(
+                            AfterProcessingTime.pastFirstElementInPane()
+                                .plusDelayOf(Duration.standardSeconds(10)))
+                        .withLateFirings(
+                            AfterPane.elementCountAtLeast(1)))
+                .withAllowedLateness(Duration.standardMinutes(5))
+                .discardingFiredPanes());
+        
+        // Process with state and timers
+        PCollection<EnrichedData> enrichedData = windowedData
+            .apply("KeyBySearchField", WithKeys.of(InputData::getSearchKey))
+            .apply("StatefulEnrichment", ParDo.of(new StatefulEnrichmentDoFn()));
+        
+        // Write to Elasticsearch with Flink sink
+        enrichedData
+            .apply("PrepareForES", MapElements
+                .into(TypeDescriptor.of(String.class))
+                .via(this::convertToJson))
+            .apply("WriteToElasticsearch", createFlinkElasticsearchSink(request));
+        
+        return pipeline;
+    }
+}
+```
+
+## 4. Stateful Processing with Flink State
+
+```java
+public class StatefulEnrichmentDoFn extends DoFn<KV<String, InputData>, EnrichedData> {
+    
+    @StateId("cache")
+    private final StateSpec<ValueState<Document>> cacheState = 
+        StateSpecs.value(AvroCoder.of(Document.class));
+    
+    @StateId("counter")
+    private final StateSpec<ValueState<Long>> counterState = 
+        StateSpecs.value(VarLongCoder.of());
+    
+    @TimerId("cacheExpiry")
+    private final TimerSpec cacheExpiryTimer = 
+        TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
+    
+    private transient RestHighLevelClient esClient;
+    
+    @Setup
+    public void setup() {
+        // Initialize Elasticsearch client with connection pooling
+        esClient = createOptimizedESClient();
+    }
+    
+    @ProcessElement
+    public void processElement(
+            ProcessContext context,
+            @StateId("cache") ValueState<Document> cache,
+            @StateId("counter") ValueState<Long> counter,
+            @TimerId("cacheExpiry") Timer cacheExpiry) {
+        
+        KV<String, InputData> element = context.element();
+        String key = element.getKey();
+        InputData input = element.getValue();
+        
+        // Check cache first
+        Document cachedDoc = cache.read();
+        if (cachedDoc == null) {
+            // Fetch from Elasticsearch
+            cachedDoc = searchElasticsearch(key);
+            cache.write(cachedDoc);
+            
+            // Set cache expiry timer (5 minutes)
+            cacheExpiry.offset(Duration.standardMinutes(5)).setRelative();
+        }
+        
+        // Update counter
+        Long count = Optional.ofNullable(counter.read()).orElse(0L);
+        counter.write(count + 1);
+        
+        // Create enriched output
+        EnrichedData enriched = EnrichedData.builder()
+            .originalData(input)
+            .enrichmentData(cachedDoc)
+            .processCount(count + 1)
+            .timestamp(context.timestamp())
+            .build();
+        
+        context.output(enriched);
+    }
+    
+    @OnTimer("cacheExpiry")
+    public void onCacheExpiry(
+            @StateId("cache") ValueState<Document> cache) {
+        cache.clear();
+    }
+}
+```
+
+## 5. Flink Cluster Deployment Options
+
+### Option A: Local Flink Cluster (Development)
+
+```bash
+# Download and start Flink
+wget https://dlcdn.apache.org/flink/flink-1.17.1/flink-1.17.1-bin-scala_2.12.tgz
+tar -xzf flink-1.17.1-bin-scala_2.12.tgz
+cd flink-1.17.1
+
+# Configure Flink
+cat >> conf/flink-conf.yaml << EOF
+jobmanager.rpc.address: localhost
+jobmanager.rpc.port: 6123
+jobmanager.memory.process.size: 1600m
+taskmanager.memory.process.size: 4096m
+taskmanager.numberOfTaskSlots: 4
+parallelism.default: 4
+state.backend: rocksdb
+state.checkpoints.dir: file:///tmp/flink-checkpoints
+state.savepoints.dir: file:///tmp/flink-savepoints
+execution.checkpointing.interval: 60000
+execution.checkpointing.mode: EXACTLY_ONCE
+EOF
+
+# Start cluster
+./bin/start-cluster.sh
+
+# Submit job
+./bin/flink run -c com.example.FlinkPipelineMain target/beam-pipeline-1.0.jar
+```
+
+### Option B: Kubernetes Deployment
+
+```yaml
+# flink-configuration-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flink-config
+  namespace: flink
+data:
+  flink-conf.yaml: |
+    jobmanager.rpc.address: flink-jobmanager
+    taskmanager.numberOfTaskSlots: 4
+    parallelism.default: 4
+    jobmanager.memory.process.size: 2048m
+    taskmanager.memory.process.size: 4096m
+    state.backend: rocksdb
+    state.checkpoints.dir: s3://my-bucket/checkpoints
+    state.savepoints.dir: s3://my-bucket/savepoints
+    execution.checkpointing.interval: 60000
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.max-concurrent-checkpoints: 1
+    restart-strategy: exponential-delay
+    restart-strategy.exponential-delay.initial-backoff: 10s
+    restart-strategy.exponential-delay.max-backoff: 2min
+    
+  log4j-console.properties: |
+    rootLogger.level = INFO
+    rootLogger.appenderRef.console.ref = ConsoleAppender
+```
+
+```yaml
+# flink-session-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-jobmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink
+      component: jobmanager
+  template:
+    metadata:
+      labels:
+        app: flink
+        component: jobmanager
+    spec:
+      containers:
+      - name: jobmanager
+        image: flink:1.17.1
+        args: ["jobmanager"]
+        ports:
+        - containerPort: 6123
+          name: rpc
+        - containerPort: 8081
+          name: webui
+        env:
+        - name: FLINK_PROPERTIES
+          value: |
+            jobmanager.rpc.address: flink-jobmanager
+            parallelism.default: 4
+        volumeMounts:
+        - name: flink-config-volume
+          mountPath: /opt/flink/conf
+        resources:
+          requests:
+            memory: "2048Mi"
+            cpu: "1"
+      volumes:
+      - name: flink-config-volume
+        configMap:
+          name: flink-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: flink
+      component: taskmanager
+  template:
+    metadata:
+      labels:
+        app: flink
+        component: taskmanager
+    spec:
+      containers:
+      - name: taskmanager
+        image: flink:1.17.1
+        args: ["taskmanager"]
+        env:
+        - name: FLINK_PROPERTIES
+          value: |
+            jobmanager.rpc.address: flink-jobmanager
+            taskmanager.numberOfTaskSlots: 4
+        volumeMounts:
+        - name: flink-config-volume
+          mountPath: /opt/flink/conf
+        resources:
+          requests:
+            memory: "4096Mi"
+            cpu: "2"
+      volumes:
+      - name: flink-config-volume
+        configMap:
+          name: flink-config
+```
+
+## 6. Spring Boot Application for Job Submission
+
+```java
+@RestController
+@RequestMapping("/api/flink")
+public class FlinkJobController {
+    
+    @Autowired
+    private FlinkJobSubmitter jobSubmitter;
+    
+    @PostMapping("/submit")
+    public ResponseEntity<JobSubmissionResponse> submitJob(
+            @RequestBody PipelineRequest request) {
+        try {
+            String jobId = jobSubmitter.submitJob(request);
+            return ResponseEntity.ok(new JobSubmissionResponse(jobId, "SUBMITTED"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(new JobSubmissionResponse(null, "FAILED", e.getMessage()));
+        }
+    }
+    
+    @GetMapping("/status/{jobId}")
+    public ResponseEntity<JobStatus> getJobStatus(@PathVariable String jobId) {
+        return ResponseEntity.ok(jobSubmitter.getJobStatus(jobId));
+    }
+    
+    @PostMapping("/cancel/{jobId}")
+    public ResponseEntity<Void> cancelJob(@PathVariable String jobId) {
+        jobSubmitter.cancelJob(jobId);
+        return ResponseEntity.ok().build();
+    }
+}
+```
+
+```java
+@Service
+@Slf4j
+public class FlinkJobSubmitter {
+    
+    @Value("${flink.rest.address:http://localhost:8081}")
+    private String flinkRestAddress;
+    
+    private final RestClient restClient;
+    
+    public FlinkJobSubmitter() {
+        this.restClient = RestClient.builder()
+            .baseUrl(flinkRestAddress)
+            .build();
+    }
+    
+    public String submitJob(PipelineRequest request) throws Exception {
+        // Build JAR with pipeline
+        File jarFile = buildPipelineJar(request);
+        
+        // Upload JAR to Flink
+        String jarId = uploadJar(jarFile);
+        
+        // Submit job
+        JobSubmitRequest submitRequest = JobSubmitRequest.builder()
+            .jarId(jarId)
+            .entryClass("com.example.FlinkPipelineMain")
+            .programArgs(buildProgramArgs(request))
+            .parallelism(request.getParallelism())
+            .savepointPath(request.getSavepointPath())
+            .allowNonRestoredState(true)
+            .build();
+        
+        ResponseEntity<JobSubmitResponse> response = restClient.post()
+            .uri("/jars/{jarId}/run", jarId)
+            .body(submitRequest)
+            .retrieve()
+            .toEntity(JobSubmitResponse.class);
+        
+        return response.getBody().getJobId();
+    }
+    
+    private File buildPipelineJar(PipelineRequest request) throws Exception {
+        // Use Maven programmatically to build JAR
+        InvocationRequest invocationRequest = new DefaultInvocationRequest();
+        invocationRequest.setPomFile(new File("pom.xml"));
+        invocationRequest.setGoals(Arrays.asList("clean", "package"));
+        invocationRequest.setProperties(buildMavenProperties(request));
+        
+        Invoker invoker = new DefaultInvoker();
+        InvocationResult result = invoker.execute(invocationRequest);
+        
+        if (result.getExitCode() != 0) {
+            throw new RuntimeException("Failed to build pipeline JAR");
+        }
+        
+        return new File("target/beam-pipeline-flink.jar");
+    }
+}
+```
+
+## 7. Monitoring and Metrics
+
+```java
+@Configuration
+public class FlinkMetricsConfig {
+    
+    @Bean
+    public MeterRegistry flinkMeterRegistry() {
+        return new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+    }
+    
+    @Component
+    public class FlinkMetricsReporter {
+        
+        @Scheduled(fixedDelay = 10000)
+        public void reportMetrics() {
+            try {
+                // Fetch metrics from Flink REST API
+                ResponseEntity<FlinkMetrics> response = restClient.get()
+                    .uri("/jobs/metrics")
+                    .retrieve()
+                    .toEntity(FlinkMetrics.class);
+                
+                FlinkMetrics metrics = response.getBody();
+                
+                // Report to Micrometer
+                meterRegistry.gauge("flink.job.uptime", metrics.getUptime());
+                meterRegistry.gauge("flink.job.checkpoints.completed", 
+                    metrics.getCheckpointsCompleted());
+                meterRegistry.gauge("flink.job.records.processed", 
+                    metrics.getRecordsProcessed());
+                meterRegistry.gauge("flink.job.backpressure", 
+                    metrics.getBackpressure());
+                
+            } catch (Exception e) {
+                log.error("Failed to fetch Flink metrics", e);
+            }
+        }
+    }
+}
+```
+
+## 8. Production Configuration
+
+```yaml
+# application-prod.yml
+flink:
+  master: flink-jobmanager.flink.svc.cluster.local:8081
+  parallelism: 16
+  checkpoint:
+    interval: 30000
+    timeout: 60000
+    min-pause: 5000
+    max-concurrent: 1
+    path: s3://my-bucket/flink-checkpoints
+  state:
+    backend: rocksdb
+    backend-path: s3://my-bucket/flink-state
+    ttl: 86400000  # 24 hours
+  restart:
+    strategy: exponential-delay
+    initial-backoff: 10s
+    max-backoff: 2m
+    backoff-multiplier: 2.0
+    reset-backoff-threshold: 10m
+    jitter-factor: 0.1
+  
+kafka:
+  bootstrap-servers: kafka-broker1:9092,kafka-broker2:9092,kafka-broker3:9092
+  consumer:
+    fetch-min-bytes: 1024
+    fetch-max-wait-ms: 500
+    max-poll-records: 5000
+    session-timeout-ms: 30000
+    
+elasticsearch:
+  hosts: es-node1:9200,es-node2:9200,es-node3:9200
+  bulk:
+    size: 5000
+    flush-interval: 10
+    max-retry: 3
+    backoff-delay: 100
+```
+
+## 9. Docker Image for Flink Job
+
+```dockerfile
+# Dockerfile
+FROM flink:1.17.1-java11
+
+# Copy job JAR
+COPY target/beam-pipeline-flink.jar /opt/flink/usrlib/beam-pipeline.jar
+
+# Copy dependencies
+COPY target/dependency/* /opt/flink/lib/
+
+# Copy configuration
+COPY src/main/resources/application-prod.yml /opt/flink/conf/
+
+# Set entrypoint
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["job-cluster", "--job-classname", "com.example.FlinkPipelineMain", \
+     "--job-id", "auto-generated", "--fromSavepoint", "/savepoints/latest", \
+     "--allowNonRestoredState"]
+```
+
+## Key Advantages of Running on Flink:
+
+1. **Exactly-Once Processing**: Guaranteed message processing semantics
+2. **Fault Tolerance**: Automatic recovery from failures with checkpointing
+3. **State Management**: Efficient state handling with RocksDB
+4. **Backpressure Handling**: Automatic flow control
+5. **Dynamic Scaling**: Can scale up/down based on load
+6. **Low Latency**: Sub-second processing latency
+7. **High Throughput**: Can process millions of events per second
+8. **Resource Efficiency**: Better resource utilization compared to DirectRunner
+
+This setup provides a production-ready, scalable solution for running your Beam pipeline on Apache Flink with proper monitoring, fault tolerance, and performance optimizations.
+
