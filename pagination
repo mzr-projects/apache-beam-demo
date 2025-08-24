@@ -1,0 +1,425 @@
+As a senior Java developer, I'll provide you with a comprehensive solution for querying multiple Elasticsearch indexes with pagination, where you can retrieve pages from each index independently and display them.
+
+## Solution Overview
+
+Here's a complete implementation using the Elasticsearch Java High-Level REST Client:
+
+### 1. Maven Dependencies
+
+```xml
+<dependencies>
+    <!-- Elasticsearch High Level REST Client -->
+    <dependency>
+        <groupId>org.elasticsearch.client</groupId>
+        <artifactId>elasticsearch-rest-high-level-client</artifactId>
+        <version>7.17.9</version>
+    </dependency>
+    
+    <!-- Jackson for JSON processing -->
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>2.14.2</version>
+    </dependency>
+    
+    <!-- Lombok (optional) -->
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <version>1.18.26</version>
+        <scope>provided</scope>
+    </dependency>
+</dependencies>
+```
+
+### 2. Main Implementation
+
+```java
+import org.apache.http.HttpHost;
+import org.elasticsearch.action.search.SearchRequest;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.client.RequestOptions;
+import org.elasticsearch.client.RestClient;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.search.sort.SortOrder;
+
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class MultiIndexPaginationService {
+    
+    private final RestHighLevelClient client;
+    private final int pageSize;
+    private final ExecutorService executorService;
+    
+    public MultiIndexPaginationService(String host, int port, int pageSize) {
+        this.client = new RestHighLevelClient(
+            RestClient.builder(new HttpHost(host, port, "http"))
+        );
+        this.pageSize = pageSize;
+        this.executorService = Executors.newFixedThreadPool(5);
+    }
+    
+    /**
+     * Query multiple indexes with independent pagination
+     */
+    public MultiIndexSearchResult searchMultipleIndexes(
+            List<String> indexNames, 
+            Map<String, Integer> currentPages,
+            String queryText) throws IOException {
+        
+        MultiIndexSearchResult result = new MultiIndexSearchResult();
+        
+        // Process each index independently
+        for (String indexName : indexNames) {
+            int currentPage = currentPages.getOrDefault(indexName, 0);
+            IndexSearchResult indexResult = searchSingleIndex(
+                indexName, 
+                currentPage, 
+                queryText
+            );
+            result.addIndexResult(indexName, indexResult);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Search a single index with pagination
+     */
+    private IndexSearchResult searchSingleIndex(
+            String indexName, 
+            int pageNumber, 
+            String queryText) throws IOException {
+        
+        SearchRequest searchRequest = new SearchRequest(indexName);
+        SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
+        
+        // Configure query
+        if (queryText != null && !queryText.isEmpty()) {
+            sourceBuilder.query(QueryBuilders.matchQuery("_all", queryText));
+        } else {
+            sourceBuilder.query(QueryBuilders.matchAllQuery());
+        }
+        
+        // Configure pagination
+        int from = pageNumber * pageSize;
+        sourceBuilder.from(from);
+        sourceBuilder.size(pageSize);
+        
+        // Add sorting for consistent pagination
+        sourceBuilder.sort("_id", SortOrder.ASC);
+        
+        // Set timeout
+        sourceBuilder.timeout(new TimeValue(60, TimeUnit.SECONDS));
+        
+        searchRequest.source(sourceBuilder);
+        
+        // Execute search
+        SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
+        
+        // Process results
+        IndexSearchResult result = new IndexSearchResult();
+        result.setIndexName(indexName);
+        result.setCurrentPage(pageNumber);
+        result.setTotalHits(searchResponse.getHits().getTotalHits().value);
+        result.setTotalPages((int) Math.ceil((double) result.getTotalHits() / pageSize));
+        
+        List<Map<String, Object>> documents = new ArrayList<>();
+        for (SearchHit hit : searchResponse.getHits().getHits()) {
+            Map<String, Object> document = hit.getSourceAsMap();
+            document.put("_id", hit.getId());
+            document.put("_score", hit.getScore());
+            documents.add(document);
+        }
+        result.setDocuments(documents);
+        
+        return result;
+    }
+    
+    /**
+     * Parallel search across multiple indexes
+     */
+    public CompletableFuture<MultiIndexSearchResult> searchMultipleIndexesAsync(
+            List<String> indexNames,
+            Map<String, Integer> currentPages,
+            String queryText) {
+        
+        List<CompletableFuture<IndexSearchResult>> futures = new ArrayList<>();
+        
+        for (String indexName : indexNames) {
+            int currentPage = currentPages.getOrDefault(indexName, 0);
+            
+            CompletableFuture<IndexSearchResult> future = CompletableFuture
+                .supplyAsync(() -> {
+                    try {
+                        return searchSingleIndex(indexName, currentPage, queryText);
+                    } catch (IOException e) {
+                        throw new CompletionException(e);
+                    }
+                }, executorService);
+            
+            futures.add(future);
+        }
+        
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            .thenApply(v -> {
+                MultiIndexSearchResult result = new MultiIndexSearchResult();
+                futures.forEach(future -> {
+                    try {
+                        IndexSearchResult indexResult = future.get();
+                        result.addIndexResult(indexResult.getIndexName(), indexResult);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                });
+                return result;
+            });
+    }
+    
+    /**
+     * Get all pages from all indexes
+     */
+    public void getAllPagesFromAllIndexes(
+            List<String> indexNames,
+            String queryText) throws IOException {
+        
+        System.out.println("=== Fetching all pages from all indexes ===\n");
+        
+        for (String indexName : indexNames) {
+            System.out.println("Processing Index: " + indexName);
+            System.out.println("-".repeat(50));
+            
+            int currentPage = 0;
+            boolean hasMorePages = true;
+            
+            while (hasMorePages) {
+                IndexSearchResult result = searchSingleIndex(indexName, currentPage, queryText);
+                
+                System.out.printf("Page %d/%d (Documents %d-%d of %d):%n",
+                    currentPage + 1,
+                    result.getTotalPages(),
+                    (currentPage * pageSize) + 1,
+                    Math.min((currentPage + 1) * pageSize, result.getTotalHits()),
+                    result.getTotalHits()
+                );
+                
+                // Display documents
+                for (Map<String, Object> doc : result.getDocuments()) {
+                    System.out.println("  - ID: " + doc.get("_id") + 
+                                     ", Score: " + doc.get("_score"));
+                    // Display other fields as needed
+                    doc.entrySet().stream()
+                        .filter(e -> !e.getKey().startsWith("_"))
+                        .forEach(e -> System.out.println("    " + e.getKey() + ": " + e.getValue()));
+                }
+                
+                currentPage++;
+                hasMorePages = currentPage < result.getTotalPages();
+                
+                if (hasMorePages) {
+                    System.out.println();
+                }
+            }
+            
+            System.out.println("\n" + "=".repeat(50) + "\n");
+        }
+    }
+    
+    public void close() throws IOException {
+        executorService.shutdown();
+        client.close();
+    }
+}
+```
+
+### 3. Result Classes
+
+```java
+import lombok.Data;
+import java.util.*;
+
+@Data
+class MultiIndexSearchResult {
+    private Map<String, IndexSearchResult> indexResults = new HashMap<>();
+    private long totalHitsAcrossAllIndexes = 0;
+    
+    public void addIndexResult(String indexName, IndexSearchResult result) {
+        indexResults.put(indexName, result);
+        totalHitsAcrossAllIndexes += result.getTotalHits();
+    }
+    
+    public void displayResults() {
+        System.out.println("=== Multi-Index Search Results ===");
+        System.out.println("Total hits across all indexes: " + totalHitsAcrossAllIndexes);
+        System.out.println();
+        
+        for (Map.Entry<String, IndexSearchResult> entry : indexResults.entrySet()) {
+            IndexSearchResult result = entry.getValue();
+            System.out.println("Index: " + result.getIndexName());
+            System.out.println("  Page: " + (result.getCurrentPage() + 1) + "/" + result.getTotalPages());
+            System.out.println("  Total Hits: " + result.getTotalHits());
+            System.out.println("  Documents in this page: " + result.getDocuments().size());
+            
+            for (Map<String, Object> doc : result.getDocuments()) {
+                System.out.println("    - " + doc);
+            }
+            System.out.println();
+        }
+    }
+}
+
+@Data
+class IndexSearchResult {
+    private String indexName;
+    private int currentPage;
+    private int totalPages;
+    private long totalHits;
+    private List<Map<String, Object>> documents = new ArrayList<>();
+}
+```
+
+### 4. Usage Example
+
+```java
+public class ElasticsearchMultiIndexExample {
+    
+    public static void main(String[] args) {
+        MultiIndexPaginationService service = null;
+        
+        try {
+            // Initialize service
+            service = new MultiIndexPaginationService("localhost", 9200, 10);
+            
+            // Define indexes to search
+            List<String> indexes = Arrays.asList("products", "orders", "customers");
+            
+            // Example 1: Get first page from each index
+            System.out.println("Example 1: First page from each index");
+            Map<String, Integer> firstPages = new HashMap<>();
+            indexes.forEach(index -> firstPages.put(index, 0));
+            
+            MultiIndexSearchResult firstPageResults = service.searchMultipleIndexes(
+                indexes, 
+                firstPages, 
+                "search term"
+            );
+            firstPageResults.displayResults();
+            
+            // Example 2: Get different pages from different indexes
+            System.out.println("\nExample 2: Different pages from different indexes");
+            Map<String, Integer> differentPages = new HashMap<>();
+            differentPages.put("products", 0);  // First page
+            differentPages.put("orders", 2);    // Third page
+            differentPages.put("customers", 1); // Second page
+            
+            MultiIndexSearchResult mixedResults = service.searchMultipleIndexes(
+                indexes, 
+                differentPages, 
+                "search term"
+            );
+            mixedResults.displayResults();
+            
+            // Example 3: Get all pages from all indexes
+            System.out.println("\nExample 3: All pages from all indexes");
+            service.getAllPagesFromAllIndexes(indexes, "search term");
+            
+            // Example 4: Async parallel search
+            System.out.println("\nExample 4: Async parallel search");
+            CompletableFuture<MultiIndexSearchResult> futureResult = 
+                service.searchMultipleIndexesAsync(indexes, firstPages, "search term");
+            
+            futureResult.thenAccept(result -> {
+                result.displayResults();
+            }).get();
+            
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (service != null) {
+                try {
+                    service.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+}
+```
+
+### 5. Advanced Pagination Manager
+
+```java
+public class PaginationStateManager {
+    private Map<String, PaginationState> indexStates = new ConcurrentHashMap<>();
+    
+    @Data
+    public static class PaginationState {
+        private int currentPage = 0;
+        private int totalPages = 0;
+        private long totalHits = 0;
+        private boolean hasNext = true;
+        private String scrollId; // For scroll API if needed
+    }
+    
+    public void updateState(String indexName, IndexSearchResult result) {
+        PaginationState state = indexStates.computeIfAbsent(
+            indexName, 
+            k -> new PaginationState()
+        );
+        state.setCurrentPage(result.getCurrentPage());
+        state.setTotalPages(result.getTotalPages());
+        state.setTotalHits(result.getTotalHits());
+        state.setHasNext(result.getCurrentPage() < result.getTotalPages() - 1);
+    }
+    
+    public void nextPage(String indexName) {
+        PaginationState state = indexStates.get(indexName);
+        if (state != null && state.isHasNext()) {
+            state.setCurrentPage(state.getCurrentPage() + 1);
+        }
+    }
+    
+    public void previousPage(String indexName) {
+        PaginationState state = indexStates.get(indexName);
+        if (state != null && state.getCurrentPage() > 0) {
+            state.setCurrentPage(state.getCurrentPage() - 1);
+        }
+    }
+    
+    public Map<String, Integer> getCurrentPages() {
+        Map<String, Integer> pages = new HashMap<>();
+        indexStates.forEach((index, state) -> 
+            pages.put(index, state.getCurrentPage())
+        );
+        return pages;
+    }
+}
+```
+
+## Key Features
+
+1. **Independent Pagination**: Each index maintains its own pagination state
+2. **Parallel Processing**: Option to query multiple indexes simultaneously
+3. **Flexible Page Navigation**: Can retrieve any page from any index
+4. **Complete Iteration**: Method to iterate through all pages of all indexes
+5. **Error Handling**: Proper exception handling and resource management
+6. **Performance Optimization**: Connection pooling and async operations
+
+## Best Practices
+
+1. **Use sorting** for consistent pagination results
+2. **Implement caching** for frequently accessed pages
+3. **Consider using Scroll API** for large result sets
+4. **Monitor memory usage** when processing multiple indexes
+5. **Implement retry logic** for network failures
+6. **Use connection pooling** for better performance
+
+This solution provides a robust framework for handling multi-index pagination in Elasticsearch with Java.
+
