@@ -1,0 +1,323 @@
+Excellent question! This is a common scenario when you need to aggregate results from multiple indices with consistent pagination. Here's how to implement this pattern using PIT across multiple indices:
+
+## 1. Multi-Index PIT Manager
+
+```java
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MultiIndexPaginationService {
+    
+    private final ElasticsearchClient client;
+    private final ExecutorService executorService;
+    private static final int PAGE_SIZE = 100;
+    
+    public MultiIndexPaginationService(ElasticsearchClient client) {
+        this.client = client;
+        this.executorService = Executors.newFixedThreadPool(10);
+    }
+    
+    // Container for PIT state across multiple indices
+    public static class MultiIndexPitContext {
+        private final Map<String, String> indexToPitId;
+        private final Map<String, Object[]> indexToSearchAfter;
+        private final Map<String, Boolean> indexHasMore;
+        
+        public MultiIndexPitContext(List<String> indices) {
+            this.indexToPitId = new ConcurrentHashMap<>();
+            this.indexToSearchAfter = new ConcurrentHashMap<>();
+            this.indexHasMore = new ConcurrentHashMap<>();
+            
+            // Initialize all indices as having more data
+            indices.forEach(index -> indexHasMore.put(index, true));
+        }
+        
+        // Getters and setters...
+    }
+}
+```
+
+## 2. Create PITs for Multiple Indices
+
+```java
+public MultiIndexPitContext createMultiIndexPits(List<String> indices) {
+    MultiIndexPitContext context = new MultiIndexPitContext(indices);
+    
+    // Create PITs for all indices in parallel
+    List<CompletableFuture<Void>> pitCreationTasks = indices.stream()
+        .map(index -> CompletableFuture.runAsync(() -> {
+            try {
+                OpenPointInTimeResponse pitResponse = client.openPointInTime(
+                    OpenPointInTimeRequest.of(p -> p
+                        .index(index)
+                        .keepAlive(t -> t.time("5m"))
+                    )
+                );
+                context.getIndexToPitId().put(index, pitResponse.id());
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to create PIT for index: " + index, e);
+            }
+        }, executorService))
+        .collect(Collectors.toList());
+    
+    // Wait for all PITs to be created
+    CompletableFuture.allOf(pitCreationTasks.toArray(new CompletableFuture[0]))
+        .join();
+    
+    return context;
+}
+```
+
+## 3. Parallel Search Across Multiple Indices
+
+```java
+public CombinedSearchResult searchAcrossIndices(MultiIndexPitContext context, 
+                                              SearchQuery searchQuery) {
+    
+    // Get indices that still have more data
+    List<String> activeIndices = context.getIndexHasMore().entrySet().stream()
+        .filter(Map.Entry::getValue)
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toList());
+    
+    if (activeIndices.isEmpty()) {
+        return new CombinedSearchResult(Collections.emptyList(), false);
+    }
+    
+    // Execute searches in parallel
+    List<CompletableFuture<IndexSearchResult>> searchTasks = activeIndices.stream()
+        .map(index -> CompletableFuture.supplyAsync(() -> 
+            searchSingleIndex(context, index, searchQuery), executorService))
+        .collect(Collectors.toList());
+    
+    // Collect all results
+    List<IndexSearchResult> indexResults = searchTasks.stream()
+        .map(CompletableFuture::join)
+        .collect(Collectors.toList());
+    
+    // Update context with new search_after values and hasMore flags
+    updateContext(context, indexResults);
+    
+    // Combine and sort results
+    return combineResults(indexResults, context);
+}
+
+private IndexSearchResult searchSingleIndex(MultiIndexPitContext context, 
+                                          String index, 
+                                          SearchQuery searchQuery) {
+    try {
+        String pitId = context.getIndexToPitId().get(index);
+        Object[] searchAfter = context.getIndexToSearchAfter().get(index);
+        
+        SearchRequest.Builder searchBuilder = new SearchRequest.Builder()
+            .pit(p -> p.id(pitId).keepAlive(t -> t.time("5m")))
+            .size(PAGE_SIZE)
+            .sort(s -> s.field(f -> f.field("timestamp").order(SortOrder.Desc)))
+            .sort(s -> s.field(f -> f.field("_id").order(SortOrder.Asc)))
+            .query(searchQuery.toElasticsearchQuery());
+        
+        if (searchAfter != null) {
+            searchBuilder.searchAfter(Arrays.asList(searchAfter));
+        }
+        
+        SearchResponse<Document> response = client.search(
+            searchBuilder.build(), 
+            Document.class
+        );
+        
+        return new IndexSearchResult(index, response);
+        
+    } catch (IOException e) {
+        throw new RuntimeException("Search failed for index: " + index, e);
+    }
+}
+```
+
+## 4. Result Combination and Sorting
+
+```java
+public static class CombinedSearchResult {
+    private final List<Document> documents;
+    private final boolean hasMore;
+    private final Map<String, Long> totalHitsPerIndex;
+    
+    // Constructor and getters...
+}
+
+public static class IndexSearchResult {
+    private final String index;
+    private final List<Document> documents;
+    private final Object[] lastSearchAfter;
+    private final boolean hasMore;
+    private final long totalHits;
+    
+    public IndexSearchResult(String index, SearchResponse<Document> response) {
+        this.index = index;
+        this.documents = response.hits().hits().stream()
+            .map(Hit::source)
+            .collect(Collectors.toList());
+        
+        this.hasMore = documents.size() == PAGE_SIZE;
+        this.totalHits = response.hits().total().value();
+        
+        // Extract search_after from last document
+        if (!response.hits().hits().isEmpty()) {
+            Hit<Document> lastHit = response.hits().hits()
+                .get(response.hits().hits().size() - 1);
+            this.lastSearchAfter = lastHit.sort().toArray();
+        } else {
+            this.lastSearchAfter = null;
+        }
+    }
+    
+    // Getters...
+}
+
+private CombinedSearchResult combineResults(List<IndexSearchResult> indexResults,
+                                          MultiIndexPitContext context) {
+    
+    // Collect all documents from all indices
+    List<Document> allDocuments = indexResults.stream()
+        .flatMap(result -> result.getDocuments().stream())
+        .collect(Collectors.toList());
+    
+    // Sort combined results (assuming timestamp-based sorting)
+    allDocuments.sort((doc1, doc2) -> 
+        doc2.getTimestamp().compareTo(doc1.getTimestamp()));
+    
+    // Check if any index has more data
+    boolean hasMore = context.getIndexHasMore().values().stream()
+        .anyMatch(Boolean::booleanValue);
+    
+    // Collect total hits per index
+    Map<String, Long> totalHitsPerIndex = indexResults.stream()
+        .collect(Collectors.toMap(
+            IndexSearchResult::getIndex,
+            IndexSearchResult::getTotalHits
+        ));
+    
+    return new CombinedSearchResult(allDocuments, hasMore, totalHitsPerIndex);
+}
+
+private void updateContext(MultiIndexPitContext context, 
+                         List<IndexSearchResult> indexResults) {
+    for (IndexSearchResult result : indexResults) {
+        context.getIndexToSearchAfter().put(result.getIndex(), 
+                                           result.getLastSearchAfter());
+        context.getIndexHasMore().put(result.getIndex(), result.hasMore());
+    }
+}
+```
+
+## 5. Complete Usage Example
+
+```java
+public void demonstrateMultiIndexPagination() {
+    List<String> indices = Arrays.asList("index1", "index2", "index3");
+    MultiIndexPitContext context = null;
+    
+    try {
+        // Create PITs for all indices
+        context = createMultiIndexPits(indices);
+        
+        SearchQuery query = new SearchQuery()
+            .withTermQuery("status", "active")
+            .withTimeRange("2023-01-01", "2023-12-31");
+        
+        int pageNumber = 0;
+        
+        while (true) {
+            System.out.println("Fetching combined page: " + (++pageNumber));
+            
+            CombinedSearchResult result = searchAcrossIndices(context, query);
+            
+            if (result.getDocuments().isEmpty()) {
+                System.out.println("No more results from any index");
+                break;
+            }
+            
+            // Process combined results
+            System.out.println("Combined results count: " + 
+                             result.getDocuments().size());
+            
+            result.getDocuments().forEach(doc -> {
+                System.out.println("Document from index: " + doc.getSourceIndex() 
+                                 + ", timestamp: " + doc.getTimestamp());
+            });
+            
+            // Show total hits per index
+            result.getTotalHitsPerIndex().forEach((index, hits) -> 
+                System.out.println("Total hits in " + index + ": " + hits));
+            
+            if (!result.hasMore()) {
+                System.out.println("All indices exhausted");
+                break;
+            }
+            
+            // Optional: Add delay between pages
+            Thread.sleep(100);
+        }
+        
+    } catch (Exception e) {
+        e.printStackTrace();
+    } finally {
+        // Cleanup all PITs
+        if (context != null) {
+            closeAllPits(context);
+        }
+    }
+}
+
+private void closeAllPits(MultiIndexPitContext context) {
+    context.getIndexToPitId().values().parallelStream()
+        .forEach(pitId -> {
+            try {
+                client.closePointInTime(
+                    ClosePointInTimeRequest.of(c -> c.id(pitId))
+                );
+            } catch (IOException e) {
+                System.err.println("Failed to close PIT: " + pitId);
+            }
+        });
+}
+```
+
+## 6. Advanced: Weighted Result Combination
+
+```java
+// If you want to limit results per index per page
+public CombinedSearchResult searchWithIndexLimits(MultiIndexPitContext context, 
+                                                 SearchQuery searchQuery,
+                                                 int maxResultsPerIndex) {
+    
+    List<CompletableFuture<IndexSearchResult>> searchTasks = 
+        getActiveIndices(context).stream()
+        .map(index -> CompletableFuture.supplyAsync(() -> {
+            // Modify page size per index
+            return searchSingleIndexWithLimit(context, index, searchQuery, 
+                                            maxResultsPerIndex);
+        }, executorService))
+        .collect(Collectors.toList());
+    
+    // Rest of the implementation...
+}
+```
+
+## Key Benefits of This Approach:
+
+1. **Parallel Execution**: All indices are searched simultaneously
+2. **Consistent Pagination**: Each index maintains its own pagination state
+3. **Flexible Sorting**: Combined results can be re-sorted globally
+4. **Resource Efficient**: PITs ensure consistent snapshots across indices
+5. **Fault Tolerant**: Individual index failures don't break the entire search
+
+## Important Considerations:
+
+- **Memory Usage**: Be careful with large result sets from multiple indices
+- **Sorting Complexity**: Global sorting requires loading all results into memory
+- **PIT Lifecycle**: Monitor and refresh PIT keep-alive times appropriately
+- **Index Balance**: Consider implementing logic to balance results per index
+- **Error Handling**: Implement proper retry logic for individual index failures
+
+This pattern is particularly useful for scenarios like searching across time-based indices, tenant-specific indices, or when you need to aggregate data from different data sources while maintaining pagination consistency.
