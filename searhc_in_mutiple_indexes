@@ -1,0 +1,418 @@
+As a Senior Java Developer working with Apache Beam and Elasticsearch, here's a comprehensive solution for querying multiple indexes, merging results, and storing them in a new index:
+
+## Solution Overview
+
+Here's a complete Apache Beam pipeline implementation that:
+1. Reads from multiple Elasticsearch indexes
+2. Merges the results
+3. Transforms/processes the data as needed
+4. Writes to a target Elasticsearch index
+
+### 1. Dependencies (Maven)
+
+```xml
+<dependencies>
+    <!-- Apache Beam Core -->
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-core</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    
+    <!-- Beam Elasticsearch IO -->
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-elasticsearch</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    
+    <!-- Beam Runner (Direct Runner for testing) -->
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-runners-direct-java</artifactId>
+        <version>2.52.0</version>
+    </dependency>
+    
+    <!-- For production, use Dataflow, Spark, or Flink runner -->
+</dependencies>
+```
+
+### 2. Main Pipeline Implementation
+
+```java
+import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionList;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.List;
+
+public class MultiIndexElasticsearchPipeline {
+    
+    private static final ObjectMapper mapper = new ObjectMapper();
+    
+    public static void main(String[] args) {
+        // Create pipeline options
+        PipelineOptions options = PipelineOptionsFactory.create();
+        Pipeline pipeline = Pipeline.create(options);
+        
+        // Configuration
+        String[] elasticsearchNodes = {"http://localhost:9200"};
+        List<String> sourceIndexes = Arrays.asList(
+            "index1", 
+            "index2", 
+            "index3"
+        );
+        String targetIndex = "merged_index";
+        
+        // Read from multiple indexes and merge
+        PCollectionList<JsonNode> allCollections = PCollectionList.empty(pipeline);
+        
+        for (String index : sourceIndexes) {
+            PCollection<JsonNode> indexData = readFromElasticsearch(
+                pipeline, 
+                elasticsearchNodes, 
+                index
+            );
+            allCollections = allCollections.and(indexData);
+        }
+        
+        // Merge all PCollections
+        PCollection<JsonNode> mergedData = allCollections
+            .apply("Flatten Collections", Flatten.pCollections())
+            .apply("Transform/Enrich Data", ParDo.of(new EnrichDataFn()));
+        
+        // Deduplicate if needed
+        PCollection<JsonNode> dedupedData = mergedData
+            .apply("Remove Duplicates", Distinct.create());
+        
+        // Write to target Elasticsearch index
+        writeToElasticsearch(dedupedData, elasticsearchNodes, targetIndex);
+        
+        // Run the pipeline
+        pipeline.run().waitUntilFinish();
+    }
+    
+    /**
+     * Read from Elasticsearch index
+     */
+    private static PCollection<JsonNode> readFromElasticsearch(
+            Pipeline pipeline,
+            String[] nodes,
+            String index) {
+        
+        return pipeline.apply(
+            "Read from " + index,
+            ElasticsearchIO.read()
+                .withConnectionConfiguration(
+                    ElasticsearchIO.ConnectionConfiguration.create(
+                        nodes, 
+                        index, 
+                        "_doc"  // Document type (use "_doc" for ES 7+)
+                    )
+                    .withUsername("elastic")  // If authentication is needed
+                    .withPassword("password")
+                )
+                .withQuery("{\"match_all\": {}}")  // Your query here
+                .withScrollKeepalive("5m")
+                .withBatchSize(1000)
+        );
+    }
+    
+    /**
+     * Write to Elasticsearch index
+     */
+    private static void writeToElasticsearch(
+            PCollection<JsonNode> data,
+            String[] nodes,
+            String index) {
+        
+        data.apply(
+            "Write to " + index,
+            ElasticsearchIO.write()
+                .withConnectionConfiguration(
+                    ElasticsearchIO.ConnectionConfiguration.create(
+                        nodes,
+                        index,
+                        "_doc"
+                    )
+                    .withUsername("elastic")
+                    .withPassword("password")
+                )
+                .withIdFn(new ExtractIdFn())  // Custom ID extraction
+                .withMaxBatchSize(1000)
+                .withMaxBatchSizeBytes(5_000_000)  // 5MB
+                .withRetryConfiguration(
+                    ElasticsearchIO.RetryConfiguration.create(
+                        5,  // Max attempts
+                        Duration.standardSeconds(10)  // Initial backoff
+                    )
+                )
+        );
+    }
+    
+    /**
+     * Custom transformation function
+     */
+    static class EnrichDataFn extends DoFn<JsonNode, JsonNode> {
+        @ProcessElement
+        public void processElement(ProcessContext context) {
+            JsonNode input = context.element();
+            ObjectNode enriched = mapper.createObjectNode();
+            
+            // Copy all fields from input
+            enriched.setAll((ObjectNode) input);
+            
+            // Add metadata
+            enriched.put("merged_timestamp", System.currentTimeMillis());
+            enriched.put("pipeline_version", "1.0.0");
+            
+            // Add source index information if available
+            if (input.has("_index")) {
+                enriched.put("source_index", input.get("_index").asText());
+            }
+            
+            context.output(enriched);
+        }
+    }
+    
+    /**
+     * Extract document ID for Elasticsearch
+     */
+    static class ExtractIdFn implements ElasticsearchIO.Write.FieldValueExtractFn {
+        @Override
+        public String apply(JsonNode input) {
+            // Use existing _id if available, otherwise generate
+            if (input.has("_id")) {
+                return input.get("_id").asText();
+            } else if (input.has("id")) {
+                return input.get("id").asText();
+            }
+            // Generate unique ID based on content hash
+            return String.valueOf(input.hashCode());
+        }
+    }
+}
+```
+
+### 3. Advanced Configuration with Custom Queries
+
+```java
+public class AdvancedMultiIndexPipeline {
+    
+    /**
+     * Configuration class for index-specific settings
+     */
+    static class IndexConfig implements Serializable {
+        String indexName;
+        String query;
+        String[] includeFields;
+        
+        public IndexConfig(String indexName, String query, String... includeFields) {
+            this.indexName = indexName;
+            this.query = query;
+            this.includeFields = includeFields;
+        }
+    }
+    
+    public static void runAdvancedPipeline(PipelineOptions options) {
+        Pipeline pipeline = Pipeline.create(options);
+        String[] nodes = {"http://localhost:9200"};
+        
+        // Define index-specific configurations
+        List<IndexConfig> indexConfigs = Arrays.asList(
+            new IndexConfig(
+                "users_index",
+                "{\"range\": {\"created_date\": {\"gte\": \"2024-01-01\"}}}",
+                "user_id", "name", "email"
+            ),
+            new IndexConfig(
+                "orders_index",
+                "{\"term\": {\"status\": \"completed\"}}",
+                "order_id", "user_id", "total_amount"
+            ),
+            new IndexConfig(
+                "products_index",
+                "{\"match\": {\"category\": \"electronics\"}}",
+                "product_id", "name", "price"
+            )
+        );
+        
+        // Read from each index with specific configuration
+        PCollectionList<JsonNode> allData = PCollectionList.empty(pipeline);
+        
+        for (IndexConfig config : indexConfigs) {
+            PCollection<JsonNode> indexData = pipeline.apply(
+                "Read " + config.indexName,
+                ElasticsearchIO.read()
+                    .withConnectionConfiguration(
+                        ElasticsearchIO.ConnectionConfiguration.create(
+                            nodes,
+                            config.indexName,
+                            "_doc"
+                        )
+                    )
+                    .withQuery(config.query)
+                    .withScrollKeepalive("5m")
+                    .withBatchSize(2000)
+            ).apply(
+                "Tag with source " + config.indexName,
+                ParDo.of(new AddSourceMetadata(config.indexName))
+            );
+            
+            allData = allData.and(indexData);
+        }
+        
+        // Process merged data
+        PCollection<JsonNode> processedData = allData
+            .apply("Flatten", Flatten.pCollections())
+            .apply("Window", 
+                Window.into(FixedWindows.of(Duration.standardMinutes(5))))
+            .apply("GroupAndAggregate", 
+                ParDo.of(new AggregateDataFn()));
+        
+        // Write to target index with dynamic naming
+        processedData.apply(
+            "Write to Elasticsearch",
+            ElasticsearchIO.write()
+                .withConnectionConfiguration(
+                    ElasticsearchIO.ConnectionConfiguration.create(
+                        nodes,
+                        "merged_data",
+                        "_doc"
+                    )
+                )
+                .withIdFn(new DynamicIdExtractor())
+                .withIndexFn(new DynamicIndexNaming())  // Dynamic index naming
+        );
+        
+        pipeline.run();
+    }
+    
+    /**
+     * Add source metadata to documents
+     */
+    static class AddSourceMetadata extends DoFn<JsonNode, JsonNode> {
+        private final String sourceName;
+        
+        public AddSourceMetadata(String sourceName) {
+            this.sourceName = sourceName;
+        }
+        
+        @ProcessElement
+        public void processElement(ProcessContext c) {
+            ObjectNode node = (ObjectNode) c.element().deepCopy();
+            node.put("_source_index", sourceName);
+            node.put("_ingestion_time", Instant.now().toString());
+            c.output(node);
+        }
+    }
+    
+    /**
+     * Dynamic index naming based on date
+     */
+    static class DynamicIndexNaming implements ElasticsearchIO.Write.FieldValueExtractFn {
+        @Override
+        public String apply(JsonNode input) {
+            // Create daily indexes
+            String date = new SimpleDateFormat("yyyy.MM.dd").format(new Date());
+            return "merged_data_" + date;
+        }
+    }
+}
+```
+
+### 4. Error Handling and Monitoring
+
+```java
+public class RobustElasticsearchPipeline {
+    
+    public static void runWithErrorHandling(PipelineOptions options) {
+        Pipeline pipeline = Pipeline.create(options);
+        
+        // Use TupleTags for handling success and failure
+        final TupleTag<JsonNode> successTag = new TupleTag<JsonNode>(){};
+        final TupleTag<JsonNode> failureTag = new TupleTag<JsonNode>(){};
+        
+        PCollection<JsonNode> inputData = readMultipleIndexes(pipeline);
+        
+        // Process with error handling
+        PCollectionTuple results = inputData.apply(
+            "Process with error handling",
+            ParDo.of(new DoFn<JsonNode, JsonNode>() {
+                @ProcessElement
+                public void processElement(ProcessContext c) {
+                    try {
+                        JsonNode processed = processDocument(c.element());
+                        c.output(successTag, processed);
+                    } catch (Exception e) {
+                        // Log error and send to failure output
+                        LOG.error("Processing failed for document", e);
+                        c.output(failureTag, c.element());
+                    }
+                }
+                
+                private JsonNode processDocument(JsonNode doc) {
+                    // Your processing logic
+                    return doc;
+                }
+            }).withOutputTags(successTag, TupleTagList.of(failureTag))
+        );
+        
+        // Handle successful records
+        results.get(successTag).apply(
+            "Write successful records",
+            ElasticsearchIO.write()
+                .withConnectionConfiguration(/* config */)
+        );
+        
+        // Handle failed records (write to dead letter queue)
+        results.get(failureTag).apply(
+            "Write to DLQ",
+            ElasticsearchIO.write()
+                .withConnectionConfiguration(
+                    ElasticsearchIO.ConnectionConfiguration.create(
+                        nodes,
+                        "failed_records",
+                        "_doc"
+                    )
+                )
+        );
+        
+        pipeline.run();
+    }
+}
+```
+
+## Key Considerations
+
+### Performance Optimization
+- **Batch Size**: Adjust batch sizes based on document size and network capacity
+- **Parallelism**: Use `.withNumSplits()` for parallel reading
+- **Windowing**: Apply windowing for streaming or large batch processing
+
+### Best Practices
+1. **Use bulk operations** for better write performance
+2. **Implement retry logic** for transient failures
+3. **Monitor pipeline metrics** using Beam's metrics API
+4. **Use dead letter queues** for failed records
+5. **Implement data validation** before writing
+6. **Consider using snapshots** for large index reads
+
+### Production Deployment
+- Use appropriate runners (Dataflow, Spark, Flink)
+- Configure autoscaling for dynamic workloads
+- Implement proper logging and monitoring
+- Use connection pooling for Elasticsearch clients
+- Consider index lifecycle management for target indexes
+
+This solution provides a robust, scalable approach to querying multiple Elasticsearch indexes, merging results, and storing them efficiently while handling errors gracefully.
+
