@@ -1,0 +1,243 @@
+Here's a comprehensive production-ready `logback.xml` configuration for Spring Boot that you can use as an external file:
+
+## Production-Ready logback.xml
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true" scanPeriod="30 seconds">
+    
+    <!-- Properties -->
+    <property name="LOG_PATH" value="${LOG_PATH:-/var/log/application}"/>
+    <property name="APP_NAME" value="${APP_NAME:-spring-app}"/>
+    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
+    <property name="LOG_PATTERN_JSON" value='{"timestamp":"%d{yyyy-MM-dd HH:mm:ss.SSS}","level":"%level","thread":"%thread","logger":"%logger{36}","message":"%msg","exception":"%ex{full}"}'/>
+    
+    <!-- Console Appender (for local debugging if needed) -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+    
+    <!-- File Appender with Rolling Policy -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}.log</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- Daily rollover -->
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <!-- Max file size -->
+            <maxFileSize>100MB</maxFileSize>
+            <!-- Keep 30 days of history -->
+            <maxHistory>30</maxHistory>
+            <!-- Total size cap -->
+            <totalSizeCap>10GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+    
+    <!-- Error File Appender -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}-error.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}-error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>60</maxHistory>
+            <totalSizeCap>5GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+    
+    <!-- JSON File Appender (for log aggregation tools) -->
+    <appender name="JSON_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}-json.log</file>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <timeZone>UTC</timeZone>
+            <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSS'Z'</timestampPattern>
+            <shortenedLoggerNameLength>36</shortenedLoggerNameLength>
+            <includeMdcKeyNames>traceId,spanId,userId</includeMdcKeyNames>
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerThrowable>30</maxDepthPerThrowable>
+                <maxLength>2048</maxLength>
+                <shortenedClassNameLength>20</shortenedClassNameLength>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}-json.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>10GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+    
+    <!-- Async Appender for better performance -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="FILE"/>
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <includeCallerData>false</includeCallerData>
+        <neverBlock>true</neverBlock>
+    </appender>
+    
+    <appender name="ASYNC_JSON" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="JSON_FILE"/>
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <includeCallerData>false</includeCallerData>
+        <neverBlock>true</neverBlock>
+    </appender>
+    
+    <!-- Logger configurations -->
+    
+    <!-- Spring Framework -->
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.springframework.web" level="INFO"/>
+    <logger name="org.springframework.security" level="INFO"/>
+    <logger name="org.springframework.boot.actuate" level="INFO"/>
+    
+    <!-- Hibernate -->
+    <logger name="org.hibernate" level="WARN"/>
+    <logger name="org.hibernate.SQL" level="WARN"/>
+    <logger name="org.hibernate.type.descriptor.sql" level="WARN"/>
+    
+    <!-- Database Connection Pool -->
+    <logger name="com.zaxxer.hikari" level="INFO"/>
+    
+    <!-- Apache libraries -->
+    <logger name="org.apache" level="WARN"/>
+    <logger name="org.apache.http" level="INFO"/>
+    
+    <!-- Your application package -->
+    <logger name="com.yourcompany" level="INFO"/>
+    
+    <!-- Root Logger -->
+    <root level="INFO">
+        <appender-ref ref="ASYNC_FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+        <appender-ref ref="ASYNC_JSON"/>
+        <!-- Remove CONSOLE appender in production -->
+        <!-- <appender-ref ref="CONSOLE"/> -->
+    </root>
+    
+    <!-- Performance logging profile -->
+    <springProfile name="production">
+        <logger name="org.springframework" level="WARN"/>
+        <logger name="com.yourcompany" level="INFO"/>
+        <root level="WARN">
+            <appender-ref ref="ASYNC_FILE"/>
+            <appender-ref ref="ERROR_FILE"/>
+            <appender-ref ref="ASYNC_JSON"/>
+        </root>
+    </springProfile>
+    
+    <!-- Debug profile for troubleshooting -->
+    <springProfile name="debug">
+        <logger name="com.yourcompany" level="DEBUG"/>
+        <root level="DEBUG">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </root>
+    </springProfile>
+    
+</configuration>
+```
+
+## How to Use as External File
+
+### 1. **Application Properties Configuration**
+
+In your `application.properties` or `application.yml`:
+
+```properties
+# application.properties
+logging.config=file:/path/to/external/logback.xml
+# or use classpath
+logging.config=classpath:logback-production.xml
+
+# Set log path
+logging.file.path=/var/log/myapp
+```
+
+Or in YAML:
+```yaml
+# application.yml
+logging:
+  config: file:/path/to/external/logback.xml
+  file:
+    path: /var/log/myapp
+```
+
+### 2. **JVM Arguments**
+
+You can also specify the external logback configuration via JVM arguments:
+
+```bash
+java -Dlogging.config=file:/path/to/external/logback.xml \
+     -Dlogging.file.path=/var/log/myapp \
+     -jar your-application.jar
+```
+
+### 3. **Environment Variables**
+
+Set environment variables for dynamic configuration:
+
+```bash
+export LOG_PATH=/var/log/myapp
+export APP_NAME=my-spring-app
+export LOGGING_CONFIG=file:/etc/myapp/logback.xml
+
+java -jar your-application.jar
+```
+
+## Additional Dependencies for JSON Logging
+
+Add to your `pom.xml`:
+
+```xml
+<dependency>
+    <groupId>net.logstash.logback</groupId>
+    <artifactId>logstash-logback-encoder</artifactId>
+    <version>7.4</version>
+</dependency>
+```
+
+Or `build.gradle`:
+
+```gradle
+implementation 'net.logstash.logback:logstash-logback-encoder:7.4'
+```
+
+## Key Features of This Configuration:
+
+1. **Rolling File Appenders**: Automatic log rotation based on size and time
+2. **Separate Error Logs**: Dedicated error log file for quick troubleshooting
+3. **JSON Logging**: Structured logs for log aggregation tools (ELK, Splunk, etc.)
+4. **Async Appenders**: Better performance with non-blocking logging
+5. **Log Level Management**: Optimized log levels for production
+6. **Spring Profiles**: Different configurations for different environments
+7. **Automatic Compression**: Old logs are compressed to save disk space
+8. **Size Caps**: Prevents logs from consuming too much disk space
+9. **MDC Support**: Includes trace IDs for distributed tracing
+
+## Best Practices:
+
+1. **External Configuration**: Keep the file outside your JAR for easy updates
+2. **Log Rotation**: Configure based on your retention requirements
+3. **Monitor Disk Space**: Set appropriate `totalSizeCap` values
+4. **Use Async Appenders**: Improves application performance
+5. **Centralized Logging**: Use JSON format for log aggregation systems
+6. **Security**: Ensure log files have appropriate permissions
+7. **Regular Cleanup**: Configure `maxHistory` based on compliance requirements
+
+This configuration provides a solid foundation for production logging with Spring Boot, offering both performance and maintainability.
+
