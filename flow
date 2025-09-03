@@ -1,0 +1,121 @@
+flowchart TD
+
+  subgraph Input["Input Sources"]
+    S1[Service 1]
+    S2[Service 2]
+    UI[UI Console]
+  end
+
+  subgraph Gateway["Message Gateway API"]
+    API[REST/GraphQL/gRPC Endpoint]
+  end
+
+  subgraph Broker["Message Broker / Queue"]
+    MQ[(Kafka / RabbitMQ / SQS)]
+  end
+
+  subgraph NotifService["Notification Service"]
+    Tgt[User Targeting & Preferences]
+    Fmt[Routing & Formatting]
+    DB[(DB: Preferences, Logs, Templates)]
+  end
+
+  subgraph Dispatchers["Channel Dispatchers"]
+    Email[Email Service (SendGrid/SES)]
+    SMS[SMS Service (Twilio)]
+    Push[Push Service (Firebase/APNS)]
+    Web[WebSocket / WebPush]
+  end
+
+  Input --> API --> MQ --> NotifService
+  NotifService --> Tgt --> Fmt
+  Fmt --> Dispatchers
+  NotifService --> DB
+  Dispatchers --> DB
+
+
+
+flowchart TD
+
+  subgraph Input["Input Sources"]
+    S1[Service 1]
+    S2[Service 2]
+    UI[UI Console]
+  end
+
+  subgraph Gateway["Message Gateway API"]
+    API[REST/GraphQL/gRPC Endpoint]
+  end
+
+  subgraph Broker["Message Broker / Queue"]
+    MQ[(Kafka / RabbitMQ / SQS)]
+  end
+
+  subgraph NotifService["Notification Service"]
+    Tgt[User Targeting & Preferences]
+    Fmt[Routing & Formatting]
+    DB[(DB: Preferences, Logs, Templates)]
+  end
+
+  subgraph Dispatchers["Channel Dispatchers"]
+    Email[Email Service (SendGrid/SES)]
+    SMS[SMS Service (Twilio)]
+    Push[Push Service (Firebase/APNS)]
+    Web[Web Notification Service]
+    WS[Real-time WebSocket Hub]
+  end
+
+  subgraph Clients["User Devices"]
+    Mobile[📱 Mobile App]
+    Browser[💻 Web Browser]
+    Admin[🖥️ Admin Console]
+  end
+
+  Input --> API --> MQ --> NotifService
+  NotifService --> Tgt --> Fmt
+  Fmt --> Dispatchers
+  NotifService --> DB
+  Dispatchers --> DB
+
+  %% Real-time Flow
+  WS --> Mobile
+  WS --> Browser
+  Web --> Browser
+  Push --> Mobile
+
+  Email --> Admin
+  SMS --> Mobile
+
+
+
+sequenceDiagram
+    participant Client as Client (Web/Mobile)
+    participant WS as WebSocket Layer
+    participant Auth as Auth Service
+    participant API as Gateway API
+    participant MQ as Message Broker
+    participant Notif as Notification Service
+
+    %% Client connection
+    Client->>WS: Connect via ws://... (with JWT)
+    WS->>Auth: Validate JWT / Session
+    Auth-->>WS: Auth Success
+    WS-->>Client: Connection Established
+
+    %% Subscribing
+    Client->>WS: Subscribe (channel: user123)
+    WS-->>Client: Subscription Acknowledged
+
+    %% Message Flow
+    API->>MQ: Publish Message {target: user123}
+    MQ->>Notif: Consume Message
+    Notif->>Notif: Check user preferences & format payload
+    Notif->>WS: Send WebSocket Message for user123
+    WS-->>Client: Push Real-Time Notification
+
+    %% Offline Scenario
+    Client--xWS: Disconnects
+    Notif->>DB: Store undelivered message
+    Client->>WS: Reconnect with JWT
+    WS->>DB: Fetch pending messages
+    WS-->>Client: Deliver missed notifications
