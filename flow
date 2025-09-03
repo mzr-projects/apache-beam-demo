@@ -85,3 +85,37 @@ flowchart TD
 
   Email --> Admin
   SMS --> Mobile
+
+
+
+sequenceDiagram
+    participant Client as Client (Web/Mobile)
+    participant WS as WebSocket Layer
+    participant Auth as Auth Service
+    participant API as Gateway API
+    participant MQ as Message Broker
+    participant Notif as Notification Service
+
+    %% Client connection
+    Client->>WS: Connect via ws://... (with JWT)
+    WS->>Auth: Validate JWT / Session
+    Auth-->>WS: Auth Success
+    WS-->>Client: Connection Established
+
+    %% Subscribing
+    Client->>WS: Subscribe (channel: user123)
+    WS-->>Client: Subscription Acknowledged
+
+    %% Message Flow
+    API->>MQ: Publish Message {target: user123}
+    MQ->>Notif: Consume Message
+    Notif->>Notif: Check user preferences & format payload
+    Notif->>WS: Send WebSocket Message for user123
+    WS-->>Client: Push Real-Time Notification
+
+    %% Offline Scenario
+    Client--xWS: Disconnects
+    Notif->>DB: Store undelivered message
+    Client->>WS: Reconnect with JWT
+    WS->>DB: Fetch pending messages
+    WS-->>Client: Deliver missed notifications
