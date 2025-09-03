@@ -8,6 +8,8 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
+import java.util.concurrent.CompletableFuture;
+
 @SpringBootApplication
 @Slf4j
 @RequiredArgsConstructor
@@ -22,7 +24,7 @@ public class DemoApplication implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        toUppercaseService.toUppercase();
-        streamingWordCountService.streamingWordCount();
+        CompletableFuture.runAsync(toUppercaseService::toUppercase);
+        CompletableFuture.runAsync(streamingWordCountService::streamingWordCount);
     }
 }

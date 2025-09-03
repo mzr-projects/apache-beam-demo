@@ -16,16 +16,16 @@ public class ToUppercaseService {
 
     public void toUppercase(){
 
-        Pipeline pipeline = PipelineCreation.createPipeline();
+        Pipeline pipeline = PipelineCreation.createPipeline("ToUppercase");
 
         PCollection<String> input = pipeline.apply(
                 "demo-input-string",
                 Create.of("Hello", "World", "My", "Name", "Is", "MT")
         );
-        input.apply("Log", ParDo.of(new OutPutLog<>("Before-ToUppercase")));
+        input.apply("Log", ParDo.of(new OutPutLog("Before-ToUppercase")));
 
         PCollection<String> toUpperCased = input.apply(ParDo.of(new ToUppercaseDoFn()));
-        toUpperCased.apply("After-ToUppercase-Log", ParDo.of(new OutPutLog<>("After-ToUppercase")));
+        toUpperCased.apply("After-ToUppercase-Log", ParDo.of(new OutPutLog("After-ToUppercase")));
 
         pipeline.run().waitUntilFinish();
     }

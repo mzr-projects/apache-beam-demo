@@ -2,15 +2,19 @@ package com.mt.apache.beam.demo.doFns;
 
 import org.apache.beam.sdk.transforms.DoFn;
 
+import java.util.Objects;
+
 public class WordCountDoFn extends DoFn<String,String> {
 
     @ProcessElement
-    public void processElement(@DoFn.Element String element, OutputReceiver<String> out) {
+    public void processElement(ProcessContext context) {
 
-        String[] words = element.split(" ");
-        for (String word : words) {
-            if (!word.isEmpty()) {
-                out.output(word);
+        if(context.element() != null ) {
+            String[] words = Objects.requireNonNull(context.element()).split(" ");
+            for (String word : words) {
+                if (!word.isEmpty()) {
+                    context.output(word);
+                }
             }
         }
     }

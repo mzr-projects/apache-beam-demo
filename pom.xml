@@ -7,30 +7,26 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
         <version>3.5.4</version>
-        <relativePath/>
     </parent>
 
     <groupId>com.mt.apache.beam</groupId>
-    <artifactId>demo</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <artifactId>apache-beam-demo</artifactId>
+    <version>0.0.1</version>
     <name>apache-beam-demo</name>
     <description>Apache beam demo in stream mode</description>
 
     <properties>
-        <java.version>21</java.version>
+        <java.version>17</java.version>
+        <maven.test.skip>true</maven.test.skip>
     </properties>
 
     <dependencies>
-        <!--
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
-        -->
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!--Apache Beam-->
         <dependency>
             <groupId>org.apache.beam</groupId>
             <artifactId>beam-sdks-java-core</artifactId>
@@ -45,20 +41,30 @@
             <groupId>org.apache.beam</groupId>
             <artifactId>beam-runners-direct-java</artifactId>
             <version>2.66.0</version>
-            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-runners-flink-1.19</artifactId>
+            <version>2.66.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.beam</groupId>
             <artifactId>beam-sdks-java-io-kafka</artifactId>
             <version>2.66.0</version>
         </dependency>
-        <!-- https://mvnrepository.com/artifact/org.apache.kafka/kafka-clients -->
+        <!--Kafka-->
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
             <version>3.9.1</version>
         </dependency>
-
+        <!--Databases-->
+        <!--
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        -->
         <!--
         <dependency>
             <groupId>com.mysql</groupId>
@@ -66,6 +72,7 @@
             <scope>runtime</scope>
         </dependency>
         -->
+        <!--Utils-->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

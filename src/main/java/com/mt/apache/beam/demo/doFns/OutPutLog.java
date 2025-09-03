@@ -2,9 +2,11 @@ package com.mt.apache.beam.demo.doFns;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.kafka.common.protocol.types.Field;
+import org.springframework.beans.factory.support.ScopeNotActiveException;
 
 @Slf4j
-public class OutPutLog<T> extends DoFn<T, T> {
+public class OutPutLog extends DoFn<String, String> {
 
     private final String prefix;
 
@@ -16,9 +18,14 @@ public class OutPutLog<T> extends DoFn<T, T> {
         this.prefix = "processedElement";
     }
 
-    @ProcessElement
+    /*@ProcessElement
     public void processElement(@DoFn.Element T element, OutputReceiver<T> out) {
         log.info("{} element: {}",prefix, element);
         out.output(element);
+    }*/
+
+    @ProcessElement
+    public void processElement(ProcessContext ctx) {
+        log.info("{} element: {}",prefix, ctx.element());
     }
 }

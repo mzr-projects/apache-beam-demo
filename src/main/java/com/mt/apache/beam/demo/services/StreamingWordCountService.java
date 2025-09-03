@@ -26,7 +26,7 @@ public class StreamingWordCountService {
 
     public void streamingWordCount() {
 
-        Pipeline pipeline = PipelineCreation.createPipeline();
+        Pipeline pipeline = PipelineCreation.createPipeline("WordCount");
         PCollection<KV<String, String>> lines = pipeline.apply(
                 "ReadFromKafka",
                 KafkaIO.<String, String>read()
@@ -34,7 +34,7 @@ public class StreamingWordCountService {
                         .withTopic(topic)
                         .withConsumerConfigUpdates(
                                 Map.of(
-                                        "auto.offset.reset", "earliest",
+                                        "auto.offset.reset", "latest",
                                         "isolation.level", "read_committed",
                                         "group.id", "apache-beam-group"
                                 )
@@ -50,7 +50,7 @@ public class StreamingWordCountService {
                 .apply("ExtractValues", Values.create())
                 .apply("ExtractWords", ParDo.of(new WordCountDoFn()));
 
-        PCollection<String> log = words.apply("FormatAsText",ParDo.of(new OutPutLog<>("formatted-words")));
+        PCollection<String> log = words.apply("FormatAsText",ParDo.of(new OutPutLog("formatted-words")));
 
         pipeline.run().waitUntilFinish();
     }
