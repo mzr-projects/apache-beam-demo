@@ -32,3 +32,56 @@ flowchart TD
   Fmt --> Dispatchers
   NotifService --> DB
   Dispatchers --> DB
+
+
+
+flowchart TD
+
+  subgraph Input["Input Sources"]
+    S1[Service 1]
+    S2[Service 2]
+    UI[UI Console]
+  end
+
+  subgraph Gateway["Message Gateway API"]
+    API[REST/GraphQL/gRPC Endpoint]
+  end
+
+  subgraph Broker["Message Broker / Queue"]
+    MQ[(Kafka / RabbitMQ / SQS)]
+  end
+
+  subgraph NotifService["Notification Service"]
+    Tgt[User Targeting & Preferences]
+    Fmt[Routing & Formatting]
+    DB[(DB: Preferences, Logs, Templates)]
+  end
+
+  subgraph Dispatchers["Channel Dispatchers"]
+    Email[Email Service (SendGrid/SES)]
+    SMS[SMS Service (Twilio)]
+    Push[Push Service (Firebase/APNS)]
+    Web[Web Notification Service]
+    WS[Real-time WebSocket Hub]
+  end
+
+  subgraph Clients["User Devices"]
+    Mobile[📱 Mobile App]
+    Browser[💻 Web Browser]
+    Admin[🖥️ Admin Console]
+  end
+
+  Input --> API --> MQ --> NotifService
+  NotifService --> Tgt --> Fmt
+  Fmt --> Dispatchers
+  NotifService --> DB
+  Dispatchers --> DB
+
+  %% Real-time Flow
+  WS --> Mobile
+  WS --> Browser
+  Web --> Browser
+  Push --> Mobile
+
+  Email --> Admin
+  SMS --> Mobile
