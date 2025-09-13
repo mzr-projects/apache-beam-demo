@@ -1,0 +1,396 @@
+You're right! If you're storing the actual WebSocket sessions in Redis (for distributed environments), the approach needs to be different. Here's how to handle active users when sessions are stored in Redis:
+
+## 1. Enhanced Redis Configuration for Session Serialization
+
+```java
+@Configuration
+public class RedisWebSocketConfig {
+
+    @Bean
+    public RedisTemplate<String, WebSocketSession> webSocketRedisTemplate(
+            LettuceConnectionFactory connectionFactory) {
+        RedisTemplate<String, WebSocketSession> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(new WebSocketSessionSerializer());
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(new WebSocketSessionSerializer());
+        return template;
+    }
+
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(
+            LettuceConnectionFactory connectionFactory) {
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
+        return template;
+    }
+}
+```
+
+## 2. WebSocket Session Serializer
+
+```java
+public class WebSocketSessionSerializer implements RedisSerializer<WebSocketSession> {
+
+    @Override
+    public byte[] serialize(WebSocketSession session) throws SerializationException {
+        if (session == null) return new byte[0];
+        
+        try {
+            // Create a simplified session data object that can be serialized
+            WebSocketSessionData sessionData = new WebSocketSessionData(
+                session.getId(),
+                session.getUri().toString(),
+                session.isOpen(),
+                session.getAttributes(),
+                System.currentTimeMillis()
+            );
+            
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.writeValueAsBytes(sessionData);
+        } catch (Exception e) {
+            throw new SerializationException("Failed to serialize WebSocketSession", e);
+        }
+    }
+
+    @Override
+    public WebSocketSession deserialize(byte[] bytes) throws SerializationException {
+        if (bytes == null || bytes.length == 0) return null;
+        
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            WebSocketSessionData sessionData = mapper.readValue(bytes, WebSocketSessionData.class);
+            
+            // Return a wrapper that implements WebSocketSession interface
+            return new RedisWebSocketSessionWrapper(sessionData);
+        } catch (Exception e) {
+            throw new SerializationException("Failed to deserialize WebSocketSession", e);
+        }
+    }
+}
+```
+
+## 3. Serializable Session Data
+
+```java
+public class WebSocketSessionData {
+    private String id;
+    private String uri;
+    private boolean open;
+    private Map<String, Object> attributes;
+    private long creationTime;
+    private String username;
+    
+    // constructors, getters, setters
+    public WebSocketSessionData() {}
+    
+    public WebSocketSessionData(String id, String uri, boolean open, 
+                              Map<String, Object> attributes, long creationTime) {
+        this.id = id;
+        this.uri = uri;
+        this.open = open;
+        this.attributes = attributes;
+        this.creationTime = creationTime;
+    }
+    
+    // getters and setters...
+}
+```
+
+## 4. Updated Session Manager for Redis-Stored Sessions
+
+```java
+@Service
+public class RedisWebSocketSessionManager {
+
+    private final RedisTemplate<String, Object> redisTemplate;
+    
+    // Redis key patterns
+    private static final String USER_SESSIONS_KEY = "websocket:user:sessions:"; // Hash
+    private static final String SESSION_DATA_KEY = "websocket:session:data:"; // String
+    private static final String SESSION_USER_KEY = "websocket:session:user:"; // String
+    private static final String ACTIVE_USERS_SET = "websocket:active:users"; // Set
+    private static final String USER_LAST_SEEN_KEY = "websocket:user:last_seen:"; // String
+
+    public RedisWebSocketSessionManager(RedisTemplate<String, Object> redisTemplate) {
+        this.redisTemplate = redisTemplate;
+    }
+
+    public void addSession(String username, WebSocketSession session) {
+        String sessionId = session.getId();
+        
+        // Store session data
+        WebSocketSessionData sessionData = new WebSocketSessionData(
+            session.getId(),
+            session.getUri().toString(),
+            session.isOpen(),
+            session.getAttributes(),
+            System.currentTimeMillis()
+        );
+        sessionData.setUsername(username);
+        
+        // Store serialized session data
+        redisTemplate.opsForValue().set(
+            SESSION_DATA_KEY + sessionId, 
+            sessionData, 
+            1, TimeUnit.HOURS
+        );
+        
+        // Map session to user
+        redisTemplate.opsForValue().set(
+            SESSION_USER_KEY + sessionId, 
+            username, 
+            1, TimeUnit.HOURS
+        );
+        
+        // Add session to user's sessions hash
+        redisTemplate.opsForHash().put(
+            USER_SESSIONS_KEY + username, 
+            sessionId, 
+            System.currentTimeMillis()
+        );
+        
+        // Add user to active users set
+        redisTemplate.opsForSet().add(ACTIVE_USERS_SET, username);
+        
+        // Update last seen
+        redisTemplate.opsForValue().set(
+            USER_LAST_SEEN_KEY + username, 
+            System.currentTimeMillis(), 
+            1, TimeUnit.HOURS
+        );
+        
+        // Set expiration for user sessions
+        redisTemplate.expire(USER_SESSIONS_KEY + username, 1, TimeUnit.HOURS);
+    }
+
+    public void removeSession(String sessionId) {
+        String username = (String) redisTemplate.opsForValue().get(SESSION_USER_KEY + sessionId);
+        
+        if (username != null) {
+            // Remove session data
+            redisTemplate.delete(SESSION_DATA_KEY + sessionId);
+            redisTemplate.delete(SESSION_USER_KEY + sessionId);
+            
+            // Remove from user's sessions
+            redisTemplate.opsForHash().delete(USER_SESSIONS_KEY + username, sessionId);
+            
+            // Check if user has remaining sessions
+            Long sessionCount = redisTemplate.opsForHash().size(USER_SESSIONS_KEY + username);
+            if (sessionCount == null || sessionCount == 0) {
+                // Remove user from active users if no sessions left
+                redisTemplate.opsForSet().remove(ACTIVE_USERS_SET, username);
+                redisTemplate.delete(USER_SESSIONS_KEY + username);
+            }
+        }
+    }
+
+    // Get all active users from Redis
+    public Set<String> getActiveUsers() {
+        Set<Object> users = redisTemplate.opsForSet().members(ACTIVE_USERS_SET);
+        return users != null ? 
+            users.stream().map(Object::toString).collect(Collectors.toSet()) : 
+            new HashSet<>();
+    }
+
+    // Get active users with details
+    public List<ActiveUserDetails> getActiveUsersWithDetails() {
+        Set<String> activeUsers = getActiveUsers();
+        List<ActiveUserDetails> userDetailsList = new ArrayList<>();
+        
+        for (String username : activeUsers) {
+            Map<Object, Object> sessions = redisTemplate.opsForHash()
+                .entries(USER_SESSIONS_KEY + username);
+            
+            Long lastSeen = (Long) redisTemplate.opsForValue()
+                .get(USER_LAST_SEEN_KEY + username);
+            
+            userDetailsList.add(new ActiveUserDetails(
+                username, 
+                sessions.size(), 
+                lastSeen,
+                new ArrayList<>(sessions.keySet()).stream()
+                    .map(Object::toString).collect(Collectors.toList())
+            ));
+        }
+        
+        return userDetailsList;
+    }
+
+    // Get session data from Redis
+    public WebSocketSessionData getSessionData(String sessionId) {
+        return (WebSocketSessionData) redisTemplate.opsForValue()
+            .get(SESSION_DATA_KEY + sessionId);
+    }
+
+    // Get all sessions for a user
+    public Set<String> getSessionIdsByUsername(String username) {
+        Map<Object, Object> sessions = redisTemplate.opsForHash()
+            .entries(USER_SESSIONS_KEY + username);
+        return sessions.keySet().stream()
+            .map(Object::toString).collect(Collectors.toSet());
+    }
+
+    // Check if user is online
+    public boolean isUserOnline(String username) {
+        return Boolean.TRUE.equals(
+            redisTemplate.opsForSet().isMember(ACTIVE_USERS_SET, username)
+        );
+    }
+
+    // Get username by session ID
+    public String getUsernameBySessionId(String sessionId) {
+        return (String) redisTemplate.opsForValue().get(SESSION_USER_KEY + sessionId);
+    }
+
+    // Get active user count
+    public Long getActiveUserCount() {
+        return redisTemplate.opsForSet().size(ACTIVE_USERS_SET);
+    }
+
+    // Clean up expired sessions (call this periodically)
+    public void cleanupExpiredSessions() {
+        Set<String> activeUsers = getActiveUsers();
+        
+        for (String username : activeUsers) {
+            Map<Object, Object> sessions = redisTemplate.opsForHash()
+                .entries(USER_SESSIONS_KEY + username);
+            
+            boolean hasValidSession = false;
+            for (Object sessionIdObj : sessions.keySet()) {
+                String sessionId = sessionIdObj.toString();
+                WebSocketSessionData sessionData = getSessionData(sessionId);
+                
+                if (sessionData == null) {
+                    // Remove invalid session reference
+                    redisTemplate.opsForHash().delete(USER_SESSIONS_KEY + username, sessionId);
+                    redisTemplate.delete(SESSION_USER_KEY + sessionId);
+                } else {
+                    hasValidSession = true;
+                }
+            }
+            
+            if (!hasValidSession) {
+                redisTemplate.opsForSet().remove(ACTIVE_USERS_SET, username);
+                redisTemplate.delete(USER_SESSIONS_KEY + username);
+            }
+        }
+    }
+}
+```
+
+## 5. Active User Details Model
+
+```java
+public class ActiveUserDetails {
+    private String username;
+    private int sessionCount;
+    private Long lastSeenTimestamp;
+    private List<String> sessionIds;
+    
+    public ActiveUserDetails(String username, int sessionCount, 
+                           Long lastSeenTimestamp, List<String> sessionIds) {
+        this.username = username;
+        this.sessionCount = sessionCount;
+        this.lastSeenTimestamp = lastSeenTimestamp;
+        this.sessionIds = sessionIds;
+    }
+    
+    // getters and setters...
+}
+```
+
+## 6. Enhanced REST Controller
+
+```java
+@RestController
+@RequestMapping("/api/websocket")
+public class WebSocketController {
+
+    private final RedisWebSocketSessionManager sessionManager;
+
+    public WebSocketController(RedisWebSocketSessionManager sessionManager) {
+        this.sessionManager = sessionManager;
+    }
+
+    @GetMapping("/users/active")
+    public ResponseEntity<Set<String>> getActiveUsers() {
+        return ResponseEntity.ok(sessionManager.getActiveUsers());
+    }
+
+    @GetMapping("/users/active/details")
+    public ResponseEntity<List<ActiveUserDetails>> getActiveUsersWithDetails() {
+        return ResponseEntity.ok(sessionManager.getActiveUsersWithDetails());
+    }
+
+    @GetMapping("/users/active/count")
+    public ResponseEntity<Long> getActiveUserCount() {
+        return ResponseEntity.ok(sessionManager.getActiveUserCount());
+    }
+
+    @GetMapping("/users/{username}/online")
+    public ResponseEntity<Boolean> isUserOnline(@PathVariable String username) {
+        return ResponseEntity.ok(sessionManager.isUserOnline(username));
+    }
+
+    @GetMapping("/users/{username}/sessions")
+    public ResponseEntity<Set<String>> getUserSessions(@PathVariable String username) {
+        return ResponseEntity.ok(sessionManager.getSessionIdsByUsername(username));
+    }
+
+    @PostMapping("/cleanup")
+    public ResponseEntity<String> cleanupExpiredSessions() {
+        sessionManager.cleanupExpiredSessions();
+        return ResponseEntity.ok("Cleanup completed");
+    }
+}
+```
+
+## 7. Scheduled Cleanup Task
+
+```java
+@Component
+public class WebSocketCleanupTask {
+
+    private final RedisWebSocketSessionManager sessionManager;
+
+    public WebSocketCleanupTask(RedisWebSocketSessionManager sessionManager) {
+        this.sessionManager = sessionManager;
+    }
+
+    @Scheduled(fixedRate = 300000) // Every 5 minutes
+    public void cleanupExpiredSessions() {
+        sessionManager.cleanupExpiredSessions();
+    }
+}
+```
+
+## Key Benefits of This Redis-Based Approach:
+
+1. **True Distributed Storage**: Sessions are stored in Redis, accessible across multiple app instances
+2. **Scalability**: No local memory limitations
+3. **Persistence**: Sessions survive application restarts
+4. **Efficient Queries**: Fast retrieval of active users using Redis Sets
+5. **Automatic Cleanup**: TTL-based expiration and scheduled cleanup
+6. **Rich Metadata**: Store additional session information like last seen time
+
+## Usage:
+
+```java
+// Get all active users
+Set<String> activeUsers = sessionManager.getActiveUsers();
+
+// Get detailed information
+List<ActiveUserDetails> details = sessionManager.getActiveUsersWithDetails();
+
+// Check specific user
+boolean isOnline = sessionManager.isUserOnline("john_doe");
+
+// Get user's sessions
+Set<String> sessions = sessionManager.getSessionIdsByUsername("john_doe");
+```
+
+This approach ensures that your active user data is truly distributed and consistent across all application instances in your cluster.
