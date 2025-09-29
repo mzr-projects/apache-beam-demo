@@ -1,0 +1,286 @@
+# Rate Limiting Implementation in Spring Cloud Gateway MVC
+
+As a senior Java developer, I'll design a comprehensive rate limiting solution for Spring Cloud Gateway with web MVC that supports per-user, per-service rate limits with automatic user disabling.
+
+## Architecture Overview
+
+Here's my recommended approach:
+
+### 1. **Data Model**
+
+```java
+@Entity
+@Table(name = "user_rate_limits")
+public class UserRateLimit {
+    @Id
+    private String userId;
+    
+    @Column(name = "is_enabled")
+    private Boolean enabled = true;
+    
+    @Column(name = "disabled_at")
+    private LocalDateTime disabledAt;
+    
+    @Column(name = "disabled_reason")
+    private String disabledReason;
+}
+
+@Entity
+@Table(name = "service_rate_policies")
+public class ServiceRatePolicy {
+    @Id
+    private String serviceId;
+    
+    @Column(name = "requests_per_minute")
+    private Integer requestsPerMinute;
+    
+    @Column(name = "requests_per_hour")
+    private Integer requestsPerHour;
+    
+    @Column(name = "requests_per_day")
+    private Integer requestsPerDay;
+}
+```
+
+### 2. **Rate Limiting Strategy**
+
+I recommend using **Redis** for distributed rate limiting with the **Token Bucket** or **Sliding Window** algorithm:
+
+```java
+@Service
+public class RateLimitService {
+    
+    private final StringRedisTemplate redisTemplate;
+    private final ServiceRatePolicyRepository policyRepository;
+    private final UserRateLimitRepository userRateLimitRepository;
+    
+    public boolean isAllowed(String userId, String serviceId) {
+        // Check if user is disabled
+        UserRateLimit userLimit = userRateLimitRepository.findById(userId)
+            .orElse(new UserRateLimit(userId));
+            
+        if (!userLimit.getEnabled()) {
+            return false;
+        }
+        
+        // Get service policy
+        ServiceRatePolicy policy = policyRepository.findById(serviceId)
+            .orElseThrow(() -> new ServiceNotFoundException(serviceId));
+        
+        // Check rate limits
+        boolean withinLimits = checkRateLimits(userId, serviceId, policy);
+        
+        if (!withinLimits) {
+            disableUser(userId, serviceId);
+            return false;
+        }
+        
+        return true;
+    }
+    
+    private boolean checkRateLimits(String userId, String serviceId, 
+                                     ServiceRatePolicy policy) {
+        String keyPrefix = String.format("rate_limit:%s:%s", userId, serviceId);
+        
+        // Check per-minute limit
+        if (policy.getRequestsPerMinute() != null) {
+            if (!checkLimit(keyPrefix + ":minute", 
+                           policy.getRequestsPerMinute(), 60)) {
+                return false;
+            }
+        }
+        
+        // Check per-hour limit
+        if (policy.getRequestsPerHour() != null) {
+            if (!checkLimit(keyPrefix + ":hour", 
+                           policy.getRequestsPerHour(), 3600)) {
+                return false;
+            }
+        }
+        
+        // Check per-day limit
+        if (policy.getRequestsPerDay() != null) {
+            if (!checkLimit(keyPrefix + ":day", 
+                           policy.getRequestsPerDay(), 86400)) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    private boolean checkLimit(String key, int limit, int windowSeconds) {
+        Long current = redisTemplate.opsForValue().increment(key);
+        
+        if (current == 1) {
+            redisTemplate.expire(key, Duration.ofSeconds(windowSeconds));
+        }
+        
+        return current <= limit;
+    }
+    
+    @Transactional
+    private void disableUser(String userId, String serviceId) {
+        UserRateLimit userLimit = userRateLimitRepository.findById(userId)
+            .orElse(new UserRateLimit(userId));
+            
+        userLimit.setEnabled(false);
+        userLimit.setDisabledAt(LocalDateTime.now());
+        userLimit.setDisabledReason(
+            String.format("Rate limit exceeded for service: %s", serviceId));
+            
+        userRateLimitRepository.save(userLimit);
+        
+        // Optionally: Send notification, log event, etc.
+        logUserDisabled(userId, serviceId);
+    }
+}
+```
+
+### 3. **Gateway Filter Implementation**
+
+```java
+@Component
+public class RateLimitFilter implements GlobalFilter, Ordered {
+    
+    private final RateLimitService rateLimitService;
+    
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String userId = extractUserId(exchange);
+        String serviceId = extractServiceId(exchange);
+        
+        if (userId == null) {
+            return unauthorizedResponse(exchange);
+        }
+        
+        boolean allowed = rateLimitService.isAllowed(userId, serviceId);
+        
+        if (!allowed) {
+            return rateLimitExceededResponse(exchange);
+        }
+        
+        return chain.filter(exchange);
+    }
+    
+    private String extractUserId(ServerWebExchange exchange) {
+        // Extract from JWT token or session
+        return exchange.getRequest().getHeaders()
+            .getFirst("X-User-Id");
+    }
+    
+    private String extractServiceId(ServerWebExchange exchange) {
+        // Extract from route or path
+        Route route = exchange.getAttribute(GATEWAY_ROUTE_ATTR);
+        return route != null ? route.getId() : "unknown";
+    }
+    
+    private Mono<Void> rateLimitExceededResponse(ServerWebExchange exchange) {
+        exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
+        exchange.getResponse().getHeaders()
+            .setContentType(MediaType.APPLICATION_JSON);
+            
+        String body = "{\"error\":\"Rate limit exceeded. Account disabled.\"}";
+        return exchange.getResponse()
+            .writeWith(Mono.just(exchange.getResponse()
+                .bufferFactory().wrap(body.getBytes())));
+    }
+    
+    @Override
+    public int getOrder() {
+        return -100; // Execute early in the filter chain
+    }
+}
+```
+
+### 4. **Configuration**
+
+```yaml
+# application.yml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: user-service
+          uri: http://user-service:8081
+          predicates:
+            - Path=/api/users/**
+        - id: order-service
+          uri: http://order-service:8082
+          predicates:
+            - Path=/api/orders/**
+  
+  redis:
+    host: localhost
+    port: 6379
+    
+  datasource:
+    url: jdbc:postgresql://localhost:5432/gateway_db
+    username: gateway_user
+    password: ${DB_PASSWORD}
+```
+
+### 5. **Additional Considerations**
+
+**Distributed Locking**: For critical sections, use Redis distributed locks:
+```java
+@Service
+public class DistributedLockService {
+    public boolean executeWithLock(String lockKey, Runnable task) {
+        Boolean acquired = redisTemplate.opsForValue()
+            .setIfAbsent(lockKey, "locked", Duration.ofSeconds(5));
+        // Implementation...
+    }
+}
+```
+
+**Monitoring & Alerting**: Add metrics and logging:
+```java
+@Aspect
+@Component
+public class RateLimitMetricsAspect {
+    private final MeterRegistry meterRegistry;
+    
+    @AfterReturning(pointcut = "execution(* RateLimitService.isAllowed(..))", 
+                    returning = "allowed")
+    public void recordRateLimit(JoinPoint joinPoint, boolean allowed) {
+        Object[] args = joinPoint.getArgs();
+        String userId = (String) args[0];
+        String serviceId = (String) args[1];
+        
+        meterRegistry.counter("rate_limit_checks", 
+            "user", userId,
+            "service", serviceId,
+            "allowed", String.valueOf(allowed)).increment();
+    }
+}
+```
+
+**Admin API** for re-enabling users:
+```java
+@RestController
+@RequestMapping("/admin/users")
+public class UserManagementController {
+    
+    @PostMapping("/{userId}/enable")
+    public ResponseEntity<Void> enableUser(@PathVariable String userId) {
+        userRateLimitRepository.findById(userId).ifPresent(limit -> {
+            limit.setEnabled(true);
+            limit.setDisabledAt(null);
+            userRateLimitRepository.save(limit);
+        });
+        return ResponseEntity.ok().build();
+    }
+}
+```
+
+## Key Benefits
+
+1. **Per-service rate limiting** - Different policies for each microservice
+2. **Distributed** - Works across multiple gateway instances using Redis
+3. **Automatic user disabling** - Prevents abuse
+4. **Configurable** - Easy to adjust limits per service
+5. **Observable** - Metrics and logging for monitoring
+6. **Recoverable** - Admin API to re-enable users
+
+Would you like me to elaborate on any specific part, such as the Redis Lua script for atomic operations, or the JWT integration for user identification?
