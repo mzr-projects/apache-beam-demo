@@ -170,3 +170,77 @@ public class JsonSearchUtility {
         }
     }
 }
+
+public class IndexFieldSearcher {
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    
+    /**
+     * Searches for a field by name and returns the index name
+     * @param jsonString The JSON string to search in
+     * @param fieldName The field name to search for
+     * @return The index name if found, null otherwise
+     */
+    public String findIndexByFieldName(String jsonString, String fieldName) {
+        try {
+            JsonNode root = objectMapper.readTree(jsonString);
+            JsonNode source = root.get("source");
+            
+            if (source == null) return null;
+            
+            // Iterate through all index names in source
+            Iterator<String> indexNames = source.fieldNames();
+            while (indexNames.hasNext()) {
+                String indexName = indexNames.next();
+                JsonNode indexData = source.get(indexName);
+                JsonNode fields = indexData.get("fields");
+                
+                if (fields != null && fields.isArray()) {
+                    for (JsonNode field : fields) {
+                        String name = field.get("name").asText();
+                        if (name.equals(fieldName)) {
+                            return indexName;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+    
+    /**
+     * Searches for a field by any property (name, faName, type)
+     * @param jsonString The JSON string to search in
+     * @param propertyName The property to search in (e.g., "name", "faName", "type")
+     * @param value The value to search for
+     * @return The index name if found, null otherwise
+     */
+    public String findIndexByFieldProperty(String jsonString, String propertyName, String value) {
+        try {
+            JsonNode root = objectMapper.readTree(jsonString);
+            JsonNode source = root.get("source");
+            
+            if (source == null) return null;
+            
+            Iterator<String> indexNames = source.fieldNames();
+            while (indexNames.hasNext()) {
+                String indexName = indexNames.next();
+                JsonNode indexData = source.get(indexName);
+                JsonNode fields = indexData.get("fields");
+                
+                if (fields != null && fields.isArray()) {
+                    for (JsonNode field : fields) {
+                        JsonNode propertyNode = field.get(propertyName);
+                        if (propertyNode != null && propertyNode.asText().equals(value)) {
+                            return indexName;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
