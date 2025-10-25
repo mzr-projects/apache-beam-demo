@@ -1,0 +1,161 @@
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.action.search.SearchRequest;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.index.query.BoolQueryBuilder;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+
+public class SirenJoinQuery {
+    
+    private RestHighLevelClient client;
+    private ObjectMapper mapper = new ObjectMapper();
+    
+    /**
+     * Create a dynamic Siren join query
+     */
+    public SearchRequest createJoinQuery(
+            String sourceIndex,
+            String targetIndex,
+            String joinField,
+            String targetJoinField,
+            Map<String, Object> filterCriteria) {
+        
+        // Build the Siren join query JSON
+        ObjectNode joinQuery = mapper.createObjectNode();
+        ObjectNode join = mapper.createObjectNode();
+        
+        // Configure the join
+        ArrayNode indices = mapper.createArrayNode();
+        indices.add(sourceIndex);
+        join.set("indices", indices);
+        join.put("on", joinField);
+        
+        // Set the request details
+        ObjectNode request = mapper.createObjectNode();
+        request.put("index", targetIndex);
+        request.put("path", targetJoinField);
+        
+        // Add filters dynamically if provided
+        if (filterCriteria != null && !filterCriteria.isEmpty()) {
+            ObjectNode query = buildDynamicQuery(filterCriteria);
+            request.set("query", query);
+        }
+        
+        join.set("request", request);
+        joinQuery.set("join", join);
+        
+        // Create the search request
+        SearchRequest searchRequest = new SearchRequest(sourceIndex);
+        SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
+        
+        // Add the join query as a raw JSON string
+        sourceBuilder.query(QueryBuilders.wrapperQuery(joinQuery.toString()));
+        searchRequest.source(sourceBuilder);
+        
+        return searchRequest;
+    }
+    
+    /**
+     * Build dynamic query from filter criteria
+     */
+    private ObjectNode buildDynamicQuery(Map<String, Object> filterCriteria) {
+        ObjectNode boolQuery = mapper.createObjectNode();
+        ObjectNode bool = mapper.createObjectNode();
+        ArrayNode must = mapper.createArrayNode();
+        
+        for (Map.Entry<String, Object> entry : filterCriteria.entrySet()) {
+            ObjectNode matchQuery = mapper.createObjectNode();
+            ObjectNode match = mapper.createObjectNode();
+            
+            if (entry.getValue() instanceof String) {
+                match.put(entry.getKey(), (String) entry.getValue());
+            } else if (entry.getValue() instanceof Number) {
+                match.put(entry.getKey(), ((Number) entry.getValue()).doubleValue());
+            }
+            
+            matchQuery.set("match", match);
+            must.add(matchQuery);
+        }
+        
+        bool.set("must", must);
+        boolQuery.set("bool", bool);
+        
+        return boolQuery;
+    }
+    
+    /**
+     * Example: Create a more complex join with filters on both sides
+     */
+    public SearchRequest createComplexJoin(
+            String sourceIndex,
+            String targetIndex,
+            String joinField,
+            String targetJoinField,
+            Map<String, Object> sourceFilters,
+            Map<String, Object> targetFilters) {
+        
+        ObjectNode rootQuery = mapper.createObjectNode();
+        ObjectNode bool = mapper.createObjectNode();
+        ArrayNode must = mapper.createArrayNode();
+        
+        // Add source filters
+        if (sourceFilters != null && !sourceFilters.isEmpty()) {
+            ObjectNode sourceQuery = buildDynamicQuery(sourceFilters);
+            must.add(sourceQuery);
+        }
+        
+        // Add join query
+        ObjectNode joinNode = mapper.createObjectNode();
+        ObjectNode join = mapper.createObjectNode();
+        
+        ArrayNode indices = mapper.createArrayNode();
+        indices.add(sourceIndex);
+        join.set("indices", indices);
+        join.put("on", joinField);
+        
+        ObjectNode request = mapper.createObjectNode();
+        request.put("index", targetIndex);
+        request.put("path", targetJoinField);
+        
+        if (targetFilters != null && !targetFilters.isEmpty()) {
+            request.set("query", buildDynamicQuery(targetFilters));
+        }
+        
+        join.set("request", request);
+        joinNode.set("join", join);
+        must.add(joinNode);
+        
+        bool.set("must", must);
+        rootQuery.set("bool", bool);
+        
+        SearchRequest searchRequest = new SearchRequest(sourceIndex);
+        SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
+        sourceBuilder.query(QueryBuilders.wrapperQuery(rootQuery.toString()));
+        searchRequest.source(sourceBuilder);
+        
+        return searchRequest;
+    }
+    
+    /**
+     * Usage example
+     */
+    public void executeJoinQuery() throws Exception {
+        Map<String, Object> filters = new HashMap<>();
+        filters.put("status", "active");
+        filters.put("age", 25);
+        
+        SearchRequest request = createJoinQuery(
+            "orders",           // source index
+            "customers",        // target index
+            "customer_id",      // join field in orders
+            "id",              // join field in customers
+            filters            // filters for customers
+        );
+        
+        SearchResponse response = client.search(request, RequestOptions.DEFAULT);
+        // Process response
+    }
+}
