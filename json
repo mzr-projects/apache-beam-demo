@@ -1,0 +1,59 @@
+    
+    /**
+     * Searches for a field by name in the JSON structure and returns the index name
+     * @param jsonString The JSON string to search
+     * @param fieldName The field name to search for
+     * @return The index name if found, null otherwise
+     */
+    public static String findIndexByFieldName(String jsonString, String fieldName) throws IOException {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode rootArray = mapper.readTree(jsonString);
+        
+        // Iterate through the array
+        for (JsonNode item : rootArray) {
+            JsonNode source = item.get("source");
+            if (source != null) {
+                // Get the first (and likely only) indexName object
+                JsonNode indexNameNode = source.fields().next().getValue();
+                JsonNode fields = indexNameNode.get("fields");
+                
+                if (fields != null && fields.isArray()) {
+                    // Search through fields array
+                    for (JsonNode field : fields) {
+                        String name = field.get("name").asText();
+                        if (name.equals(fieldName)) {
+                            // Return the id (index name)
+                            return indexNameNode.get("id").asText();
+                        }
+                    }
+                }
+            }
+        }
+        return null; // Field not found
+    }
+    
+    /**
+     * Alternative: Search by multiple criteria (name, faName, or type)
+     */
+    public static String findIndexByFieldCriteria(String jsonString, String searchKey, String searchValue) throws IOException {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode rootArray = mapper.readTree(jsonString);
+        
+        for (JsonNode item : rootArray) {
+            JsonNode source = item.get("source");
+            if (source != null) {
+                JsonNode indexNameNode = source.fields().next().getValue();
+                JsonNode fields = indexNameNode.get("fields");
+                
+                if (fields != null && fields.isArray()) {
+                    for (JsonNode field : fields) {
+                        JsonNode fieldValue = field.get(searchKey);
+                        if (fieldValue != null && fieldValue.asText().equals(searchValue)) {
+                            return indexNameNode.get("id").asText();
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
