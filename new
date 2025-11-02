@@ -1,0 +1,16 @@
+Map<String, Map<String, List<String>>> categorizedData = new HashMap<>();
+
+for (Map.Entry<String, List<String>> categoryEntry : categoryMap.entrySet()) {
+    String category = categoryEntry.getKey();
+    List<String> itemsInCategory = categoryEntry.getValue();
+    
+    Map<String, List<String>> itemsData = new HashMap<>();
+    
+    for (String item : itemsInCategory) {
+        if (dataMap.containsKey(item)) {
+            itemsData.put(item, dataMap.get(item));
+        }
+    }
+    
+    categorizedData.put(category, itemsData);
+}
