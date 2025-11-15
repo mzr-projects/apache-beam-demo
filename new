@@ -1,16 +1,191 @@
-Map<String, Map<String, List<String>>> categorizedData = new HashMap<>();
+import org.mapstruct.Mapper;
+import org.mapstruct.factory.Mappers;
+import java.lang.reflect.Field;
+import java.lang.reflect.ParameterizedType;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
-for (Map.Entry<String, List<String>> categoryEntry : categoryMap.entrySet()) {
-    String category = categoryEntry.getKey();
-    List<String> itemsInCategory = categoryEntry.getValue();
+@Mapper
+public interface GenericMapper {
+    GenericMapper INSTANCE = Mappers.getMapper(GenericMapper.class);
     
-    Map<String, List<String>> itemsData = new HashMap<>();
-    
-    for (String item : itemsInCategory) {
-        if (dataMap.containsKey(item)) {
-            itemsData.put(item, dataMap.get(item));
+    /**
+     * Maps a Map<String, String> to any target class
+     * @param map Source map
+     * @param targetClass Target class type
+     * @return Instance of target class with mapped values
+     */
+    default <T> T mapToObject(Map<String, String> map, Class<T> targetClass) {
+        if (map == null || targetClass == null) {
+            return null;
+        }
+        
+        try {
+            T instance = targetClass.getDeclaredConstructor().newInstance();
+            
+            // Iterate through all fields of the target class
+            for (Field field : targetClass.getDeclaredFields()) {
+                field.setAccessible(true);
+                
+                String fieldName = field.getName();
+                String value = map.get(fieldName);
+                
+                if (value != null) {
+                    Object convertedValue = convertValue(value, field.getType());
+                    field.set(instance, convertedValue);
+                }
+            }
+            
+            return instance;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to map to " + targetClass.getName(), e);
         }
     }
     
-    categorizedData.put(category, itemsData);
+    /**
+     * Maps a List of Maps to a List of target class instances
+     * @param maps List of source maps
+     * @param targetClass Target class type
+     * @return List of target class instances
+     */
+    default <T> List<T> mapToList(List<Map<String, String>> maps, Class<T> targetClass) {
+        if (maps == null) {
+            return null;
+        }
+        return maps.stream()
+            .map(map -> mapToObject(map, targetClass))
+            .collect(Collectors.toList());
+    }
+    
+    /**
+     * Converts string value to target type
+     * @param value String value to convert
+     * @param targetType Target type
+     * @return Converted value
+     */
+    default Object convertValue(String value, Class<?> targetType) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        
+        try {
+            if (targetType == String.class) {
+                return value;
+            } else if (targetType == Integer.class || targetType == int.class) {
+                return Integer.parseInt(value);
+            } else if (targetType == Long.class || targetType == long.class) {
+                return Long.parseLong(value);
+            } else if (targetType == Double.class || targetType == double.class) {
+                return Double.parseDouble(value);
+            } else if (targetType == Float.class || targetType == float.class) {
+                return Float.parseFloat(value);
+            } else if (targetType == Boolean.class || targetType == boolean.class) {
+                return Boolean.parseBoolean(value);
+            } else if (targetType == Short.class || targetType == short.class) {
+                return Short.parseShort(value);
+            } else if (targetType == Byte.class || targetType == byte.class) {
+                return Byte.parseByte(value);
+            } else if (targetType == Character.class || targetType == char.class) {
+                return value.charAt(0);
+            } else if (targetType.isEnum()) {
+                return Enum.valueOf((Class<Enum>) targetType, value);
+            }
+            // Add more type conversions as needed
+            return value;
+        } catch (Exception e) {
+            // Return null if conversion fails
+            return null;
+        }
+    }
+}
+
+// Example usage classes
+class Person {
+    private String name;
+    private String email;
+    private Integer age;
+    private String city;
+    
+    public Person() {}
+    
+    // Getters and setters
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getEmail() { return email; }
+    public void setEmail(String email) { this.email = email; }
+    public Integer getAge() { return age; }
+    public void setAge(Integer age) { this.age = age; }
+    public String getCity() { return city; }
+    public void setCity(String city) { this.city = city; }
+    
+    @Override
+    public String toString() {
+        return "Person{name='" + name + "', email='" + email + 
+               "', age=" + age + ", city='" + city + "'}";
+    }
+}
+
+class Product {
+    private String productName;
+    private Double price;
+    private Integer stock;
+    private Boolean available;
+    
+    public Product() {}
+    
+    // Getters and setters
+    public String getProductName() { return productName; }
+    public void setProductName(String productName) { this.productName = productName; }
+    public Double getPrice() { return price; }
+    public void setPrice(Double price) { this.price = price; }
+    public Integer getStock() { return stock; }
+    public void setStock(Integer stock) { this.stock = stock; }
+    public Boolean getAvailable() { return available; }
+    public void setAvailable(Boolean available) { this.available = available; }
+    
+    @Override
+    public String toString() {
+        return "Product{productName='" + productName + "', price=" + price + 
+               ", stock=" + stock + ", available=" + available + "}";
+    }
+}
+
+// Usage example
+class Main {
+    public static void main(String[] args) {
+        // Example 1: Map to Person
+        Map<String, String> personMap = new HashMap<>();
+        personMap.put("name", "John Doe");
+        personMap.put("email", "john@example.com");
+        personMap.put("age", "30");
+        personMap.put("city", "New York");
+        
+        Person person = GenericMapper.INSTANCE.mapToObject(personMap, Person.class);
+        System.out.println(person);
+        
+        // Example 2: Map to Product
+        Map<String, String> productMap = new HashMap<>();
+        productMap.put("productName", "Laptop");
+        productMap.put("price", "999.99");
+        productMap.put("stock", "50");
+        productMap.put("available", "true");
+        
+        Product product = GenericMapper.INSTANCE.mapToObject(productMap, Product.class);
+        System.out.println(product);
+        
+        // Example 3: List of maps to list of objects
+        List<Map<String, String>> personMaps = new ArrayList<>();
+        personMaps.add(personMap);
+        
+        Map<String, String> anotherPersonMap = new HashMap<>();
+        anotherPersonMap.put("name", "Jane Smith");
+        anotherPersonMap.put("email", "jane@example.com");
+        anotherPersonMap.put("age", "28");
+        anotherPersonMap.put("city", "London");
+        personMaps.add(anotherPersonMap);
+        
+        List<Person> people = GenericMapper.INSTANCE.mapToList(personMaps, Person.class);
+        people.forEach(System.out::println);
+    }
 }
