@@ -170,3 +170,61 @@ class ObjectComparator {
         }
     }
 }
+
+####################
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+public class ProfileComparator {
+
+    public ProfileDiffResult compare(PersonProfile p1, PersonProfile p2) {
+        ProfileDiffResult result = new ProfileDiffResult();
+
+        // 1. Compare Primitives / Strings
+        if (!Objects.equals(p1.getName(), p2.getName())) {
+            result.addFieldChange("Name", p1.getName(), p2.getName());
+        }
+        if (!Objects.equals(p1.getEmail(), p2.getEmail())) {
+            result.addFieldChange("Email", p1.getEmail(), p2.getEmail());
+        }
+
+        // 2. Compare Collections (Trips)
+        compareTrips(p1.getTrips(), p2.getTrips(), result);
+
+        // 3. Compare Collections (Relations)
+        compareRelations(p1.getRelations(), p2.getRelations(), result);
+
+        return result;
+    }
+
+    private void compareTrips(List<Trip> oldList, List<Trip> newList, ProfileDiffResult result) {
+        // Handle nulls gracefully
+        List<Trip> l1 = oldList == null ? List.of() : oldList;
+        List<Trip> l2 = newList == null ? List.of() : newList;
+
+        // Optimization: Use Sets for O(1) lookup during difference calculation
+        Set<Trip> set1 = new HashSet<>(l1);
+        Set<Trip> set2 = new HashSet<>(l2);
+
+        // Calculated ADDED: Present in New (set2) but not in Old (set1)
+        List<Trip> added = l2.stream()
+                .filter(item -> !set1.contains(item))
+                .collect(Collectors.toList());
+        result.getAddedTrips().addAll(added);
+
+        // Calculate REMOVED: Present in Old (set1) but not in New (set2)
+        List<Trip> removed = l1.stream()
+                .filter(item -> !set2.contains(item))
+                .collect(Collectors.toList());
+        result.getRemovedTrips().addAll(removed);
+    }
+    
+    private void compareRelations(List<Relation> oldList, List<Relation> newList, ProfileDiffResult result) {
+        // Same logic as compareTrips, adapted for Relation type
+        // ...
+    }
+}
