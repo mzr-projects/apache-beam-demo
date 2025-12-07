@@ -173,6 +173,38 @@ class ObjectComparator {
 
 ####################
 
+import java.util.ArrayList;
+import java.util.List;
+
+public class ProfileDiffResult {
+    private final List<String> fieldChanges = new ArrayList<>();
+    private final List<Trip> addedTrips = new ArrayList<>();
+    private final List<Trip> removedTrips = new ArrayList<>();
+    private final List<Relation> addedRelations = new ArrayList<>();
+    private final List<Relation> removedRelations = new ArrayList<>();
+
+    // Getters and helper methods to add changes
+    public void addFieldChange(String fieldName, Object oldVal, Object newVal) {
+        fieldChanges.add(String.format("%s: %s -> %s", fieldName, oldVal, newVal));
+    }
+    
+    // ... getters for the lists
+    
+    @Override
+    public String toString() {
+        return "Diff:\\nFields: " + fieldChanges + 
+               "\\nAdded Trips: " + addedTrips + 
+               "\\nRemoved Trips: " + removedTrips;
+    }
+    
+    // Accessors for logic below
+    public List<Trip> getAddedTrips() { return addedTrips; }
+    public List<Trip> getRemovedTrips() { return removedTrips; }
+    public List<Relation> getAddedRelations() { return addedRelations; }
+    public List<Relation> getRemovedRelations() { return removedRelations; }
+}
+
+
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
