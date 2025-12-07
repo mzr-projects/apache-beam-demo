@@ -1,0 +1,172 @@
+import java.lang.reflect.Field;
+import java.util.*;
+
+// Example class to compare
+class Person {
+    private String name;
+    private String email;
+    private List<String> hobbies;
+    private List<Integer> scores;
+    
+    public Person(String name, String email, List<String> hobbies, List<Integer> scores) {
+        this.name = name;
+        this.email = email;
+        this.hobbies = hobbies;
+        this.scores = scores;
+    }
+    
+    // Getters
+    public String getName() { return name; }
+    public String getEmail() { return email; }
+    public List<String> getHobbies() { return hobbies; }
+    public List<Integer> getScores() { return scores; }
+}
+
+// Class to represent a difference
+class Difference {
+    private String fieldName;
+    private String location;
+    private Object value1;
+    private Object value2;
+    
+    public Difference(String fieldName, String location, Object value1, Object value2) {
+        this.fieldName = fieldName;
+        this.location = location;
+        this.value1 = value1;
+        this.value2 = value2;
+    }
+    
+    @Override
+    public String toString() {
+        return String.format("Field: %s, Location: %s\n  Object1: %s\n  Object2: %s", 
+                           fieldName, location, value1, value2);
+    }
+}
+
+// Main comparison utility
+class ObjectComparator {
+    
+    public static List<Difference> compareObjects(Object obj1, Object obj2) {
+        List<Difference> differences = new ArrayList<>();
+        
+        if (obj1 == null || obj2 == null) {
+            if (obj1 != obj2) {
+                differences.add(new Difference("root", "object", obj1, obj2));
+            }
+            return differences;
+        }
+        
+        if (!obj1.getClass().equals(obj2.getClass())) {
+            differences.add(new Difference("root", "class", 
+                obj1.getClass().getName(), obj2.getClass().getName()));
+            return differences;
+        }
+        
+        Field[] fields = obj1.getClass().getDeclaredFields();
+        
+        for (Field field : fields) {
+            field.setAccessible(true);
+            try {
+                Object val1 = field.get(obj1);
+                Object val2 = field.get(obj2);
+                
+                compareField(field.getName(), val1, val2, differences);
+                
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+        }
+        
+        return differences;
+    }
+    
+    private static void compareField(String fieldName, Object val1, Object val2, 
+                                    List<Difference> differences) {
+        if (val1 == null && val2 == null) {
+            return;
+        }
+        
+        if (val1 == null || val2 == null) {
+            differences.add(new Difference(fieldName, fieldName, val1, val2));
+            return;
+        }
+        
+        if (val1 instanceof List && val2 instanceof List) {
+            compareList(fieldName, (List<?>) val1, (List<?>) val2, differences);
+        } else if (val1 instanceof String && val2 instanceof String) {
+            if (!val1.equals(val2)) {
+                differences.add(new Difference(fieldName, fieldName, val1, val2));
+            }
+        } else {
+            if (!val1.equals(val2)) {
+                differences.add(new Difference(fieldName, fieldName, val1, val2));
+            }
+        }
+    }
+    
+    private static void compareList(String fieldName, List<?> list1, List<?> list2, 
+                                   List<Difference> differences) {
+        if (list1.size() != list2.size()) {
+            differences.add(new Difference(fieldName, fieldName + ".size", 
+                list1.size(), list2.size()));
+        }
+        
+        int minSize = Math.min(list1.size(), list2.size());
+        
+        for (int i = 0; i < minSize; i++) {
+            Object item1 = list1.get(i);
+            Object item2 = list2.get(i);
+            
+            if (item1 == null && item2 == null) {
+                continue;
+            }
+            
+            if (item1 == null || item2 == null || !item1.equals(item2)) {
+                String location = fieldName + "[" + i + "]";
+                differences.add(new Difference(fieldName, location, item1, item2));
+            }
+        }
+        
+        // Report extra elements in longer list
+        if (list1.size() > minSize) {
+            for (int i = minSize; i < list1.size(); i++) {
+                String location = fieldName + "[" + i + "]";
+                differences.add(new Difference(fieldName, location, 
+                    list1.get(i), "MISSING"));
+            }
+        }
+        
+        if (list2.size() > minSize) {
+            for (int i = minSize; i < list2.size(); i++) {
+                String location = fieldName + "[" + i + "]";
+                differences.add(new Difference(fieldName, location, 
+                    "MISSING", list2.get(i)));
+            }
+        }
+    }
+    
+    public static void main(String[] args) {
+        // Example usage
+        Person person1 = new Person(
+            "John Doe",
+            "john@example.com",
+            Arrays.asList("Reading", "Gaming", "Cooking"),
+            Arrays.asList(85, 92, 78)
+        );
+        
+        Person person2 = new Person(
+            "John Doe",
+            "john.doe@example.com",
+            Arrays.asList("Reading", "Swimming", "Cooking"),
+            Arrays.asList(85, 88, 78, 95)
+        );
+        
+        List<Difference> differences = compareObjects(person1, person2);
+        
+        System.out.println("Found " + differences.size() + " differences:\n");
+        for (Difference diff : differences) {
+            System.out.println(diff);
+            System.out.println();
+        }
+    }
+}
