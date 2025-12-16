@@ -1,0 +1,30 @@
+@Bean
+@StepScope
+public MultiResourceItemReader<BufferedImage> imageReader(
+        @Value("#{stepExecutionContext['baseDir']}") String baseDir) throws IOException {
+
+    Path imageRoot = Paths.get(baseDir)
+        .resolve("**/images"); // logical path, not glob
+
+    List<Resource> resources;
+
+    try (Stream<Path> stream = Files.walk(Paths.get(baseDir))) {
+        resources = stream
+            .filter(p -> p.getFileName().toString().equals("images"))
+            .flatMap(imgDir -> {
+                try {
+                    return Files.list(imgDir);
+                } catch (IOException e) {
+                    return Stream.empty();
+                }
+            })
+            .filter(p -> p.toString().endsWith(".jpg"))
+            .map(p -> new FileSystemResource(p.toFile()))
+            .toList();
+    }
+
+    MultiResourceItemReader<BufferedImage> reader = new MultiResourceItemReader<>();
+    reader.setResources(resources.toArray(Resource[]::new));
+    reader.setDelegate(new ImageItemReader());
+    return reader;
+}
