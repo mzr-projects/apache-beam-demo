@@ -28,3 +28,26 @@ public MultiResourceItemReader<BufferedImage> imageReader(
     reader.setDelegate(new ImageItemReader());
     return reader;
 }
+
+
+
+
+
+@StepScope
+public class StreamingImageReader implements ItemReader<Path> {
+
+    private final Iterator<Path> iterator;
+
+    public StreamingImageReader(
+        @Value("#{stepExecutionContext['baseDir']}") String baseDir) throws IOException {
+
+        this.iterator = Files.walk(Paths.get(baseDir))
+            .filter(p -> p.toString().endsWith(".jpg"))
+            .iterator();
+    }
+
+    @Override
+    public Path read() {
+        return iterator.hasNext() ? iterator.next() : null;
+    }
+}
