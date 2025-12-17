@@ -1,53 +1,126 @@
-@Bean
-@StepScope
-public MultiResourceItemReader<BufferedImage> imageReader(
-        @Value("#{stepExecutionContext['baseDir']}") String baseDir) throws IOException {
+import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.ResourceAwareItemReaderItemStream;
+import org.springframework.core.io.Resource;
+import org.springframework.stereotype.Component;
 
-    Path imageRoot = Paths.get(baseDir)
-        .resolve("**/images"); // logical path, not glob
+@Component
+public class SingleResourceItemReader implements ItemReader<Resource>, ResourceAwareItemReaderItemStream<Resource> {
 
-    List<Resource> resources;
+    private Resource resource;
+    private boolean hasRead = true;  // Start as true to handle edge cases
 
-    try (Stream<Path> stream = Files.walk(Paths.get(baseDir))) {
-        resources = stream
-            .filter(p -> p.getFileName().toString().equals("images"))
-            .flatMap(imgDir -> {
-                try {
-                    return Files.list(imgDir);
-                } catch (IOException e) {
-                    return Stream.empty();
-                }
-            })
-            .filter(p -> p.toString().endsWith(".jpg"))
-            .map(p -> new FileSystemResource(p.toFile()))
-            .toList();
+    @Override
+    public Resource read() {
+        if (hasRead || resource == null) {
+            return null;
+        }
+        hasRead = true;
+        return resource;
     }
 
-    MultiResourceItemReader<BufferedImage> reader = new MultiResourceItemReader<>();
-    reader.setResources(resources.toArray(Resource[]::new));
-    reader.setDelegate(new ImageItemReader());
-    return reader;
+    @Override
+    public void setResource(Resource resource) {
+        this.resource = resource;
+        hasRead = false;  // Reset for the new resource
+    }
+
+    // ItemStream methods (minimal implementation; MultiResourceItemReader handles most state)
+    @Override
+    public void open(org.springframework.batch.item.ExecutionContext executionContext) {
+        // No-op
+    }
+
+    @Override
+    public void update(org.springframework.batch.item.ExecutionContext executionContext) {
+        // No-op
+    }
+
+    @Override
+    public void close() {
+        // No-op
+    }
+}
+
+
+
+
+import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+
+import java.io.IOException;
+import java.util.Arrays;
+
+@Configuration
+public class BatchConfig {
+
+    @Bean
+    @StepScope  // Required for late binding of job parameters
+    public MultiResourceItemReader<Resource> imageFileReader(
+            @Value("#{jobParameters['input.directory']}") String inputDirectory,
+            SingleResourceItemReader delegate) throws IOException {
+
+        MultiResourceItemReader<Resource> reader = new MultiResourceItemReader<>();
+        reader.setDelegate(delegate);
+
+        // Resolve resources recursively
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        String pattern = "file:" + inputDirectory.replace("\\", "/") + "/**/*";  // All files recursively
+
+        Resource[] allResources = resolver.getResources(pattern);
+
+        // Optional: Filter by common image extensions (case-insensitive)
+        Resource[] imageResources = Arrays.stream(allResources)
+                .filter(r -> {
+                    String filename = r.getFilename();
+                    if (filename == null) return false;
+                    String lower = filename.toLowerCase();
+                    return lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
+                           lower.endsWith(".png") || lower.endsWith(".gif") ||
+                           lower.endsWith(".bmp") || lower.endsWith(".webp");
+                })
+                .sorted((r1, r2) -> r1.getFilename().compareTo(r2.getFilename()))  // Optional: sort alphabetically
+                .toArray(Resource[]::new);
+
+        reader.setResources(imageResources);
+        reader.setSaveState(true);  // For restartability
+
+        return reader;
+    }
+
+    // Other beans: ItemProcessor, ItemWriter, Step, Job...
 }
 
 
 
 
 
-@StepScope
-public class StreamingImageReader implements ItemReader<Path> {
+import org.springframework.batch.item.ItemProcessor;
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
+import org.springframework.core.io.Resource;
 
-    private final Iterator<Path> iterator;
-
-    public StreamingImageReader(
-        @Value("#{stepExecutionContext['baseDir']}") String baseDir) throws IOException {
-
-        this.iterator = Files.walk(Paths.get(baseDir))
-            .filter(p -> p.toString().endsWith(".jpg"))
-            .iterator();
-    }
+public class ImageProcessingProcessor implements ItemProcessor<Resource, ProcessedImage> {  // Replace ProcessedImage with your DTO
 
     @Override
-    public Path read() {
-        return iterator.hasNext() ? iterator.next() : null;
+    public ProcessedImage process(Resource resource) throws Exception {
+        String filename = resource.getFilename();
+
+        try (var inputStream = resource.getInputStream()) {
+            BufferedImage image = ImageIO.read(inputStream);
+            if (image == null) {
+                // Not a readable image format; skip
+                System.out.println("Skipping non-image file: " + filename);
+                return null;
+            }
+
+            // Process the image here (e.g., resize, analyze, etc.)
+            // Example: just wrap it
+            return new ProcessedImage(filename, image);
+        }
     }
 }
