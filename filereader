@@ -124,3 +124,172 @@ public class ImageProcessingProcessor implements ItemProcessor<Resource, Process
         }
     }
 }
+
+
+
+
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.ItemProcessor;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.file.FlatFileItemWriter;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.batch.item.file.builder.FlatFileItemWriterBuilder;
+import org.springframework.batch.item.file.transform.DelimitedLineAggregator;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.util.Arrays;
+
+@Configuration
+public class BatchConfig {
+
+    // ----------------------- DTO for processed image metadata -----------------------
+    public record ImageMetadata(String filename, int width, int height) {}
+
+    // ----------------------- Delegate reader: returns one Resource per file -----------------------
+    public static class SingleResourceItemReader implements ItemReader<Resource>, org.springframework.batch.core.item.ResourceAware {
+
+        private Resource resource;
+        private boolean hasBeenRead = false;
+
+        @Override
+        public Resource read() {
+            if (hasBeenRead || resource == null) {
+                return null;
+            }
+            hasBeenRead = true;
+            return resource;
+        }
+
+        @Override
+        public void setResource(Resource resource) {
+            this.resource = resource;
+            hasBeenRead = false;
+        }
+    }
+
+    // ----------------------- Bean: shared delegate -----------------------
+    @Bean
+    public SingleResourceItemReader singleResourceDelegate() {
+        return new SingleResourceItemReader();
+    }
+
+    // ----------------------- MultiResourceItemReader (recursive, filtered) -----------------------
+    @Bean
+    @org.springframework.batch.core.configuration.annotation.StepScope
+    public MultiResourceItemReader<Resource> imageFileReader(
+            @Value("#{jobParameters['input.directory']}") String inputDirectory,
+            SingleResourceItemReader delegate) throws IOException {
+
+        MultiResourceItemReader<Resource> reader = new MultiResourceItemReader<>();
+        reader.setDelegate(delegate);
+        reader.setSaveState(true); // Enables restartability
+
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+
+        // Recursive pattern - all files
+        String pattern = "file:" + inputDirectory.replace("\\", "/") + "/**/*";
+        Resource[] allResources = resolver.getResources(pattern);
+
+        // Filter for common image extensions (case-insensitive)
+        Resource[] imageResources = Arrays.stream(allResources)
+                .filter(r -> {
+                    String filename = r.getFilename();
+                    if (filename == null) return false;
+                    String lower = filename.toLowerCase();
+                    return lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
+                           lower.endsWith(".png") || lower.endsWith(".gif") ||
+                           lower.endsWith(".bmp") || lower.endsWith(".tiff") ||
+                           lower.endsWith(".tif") || lower.endsWith(".webp");
+                })
+                .sorted((r1, r2) -> {
+                    String f1 = r1.getFilename();
+                    String f2 = r2.getFilename();
+                    return f1 != null && f2 != null ? f1.compareTo(f2) : 0;
+                })
+                .toArray(Resource[]::new);
+
+        reader.setResources(imageResources);
+
+        return reader;
+    }
+
+    // ----------------------- ItemProcessor: loads image and extracts metadata -----------------------
+    @Bean
+    public ItemProcessor<Resource, ImageMetadata> imageProcessor() {
+        return resource -> {
+            String filename = resource.getFilename();
+
+            try (var inputStream = resource.getInputStream()) {
+                BufferedImage image = ImageIO.read(inputStream);
+                if (image == null) {
+                    // Not a supported/readable image → skip
+                    System.out.println("Skipping non-image or unsupported format: " + filename);
+                    return null;
+                }
+                return new ImageMetadata(filename, image.getWidth(), image.getHeight());
+            } catch (Exception e) {
+                // Log and skip, or rethrow to fail chunk
+                System.err.println("Failed to read image: " + filename + " - " + e.getMessage());
+                return null; // Skip on error
+            }
+        };
+    }
+
+    // ----------------------- FlatFileItemWriter: writes CSV metadata -----------------------
+    @Bean
+    @org.springframework.batch.core.configuration.annotation.StepScope
+    public FlatFileItemWriter<ImageMetadata> metadataWriter(
+            @Value("#{jobParameters['output.file']}") String outputFile) {
+
+        return new FlatFileItemWriterBuilder<ImageMetadata>()
+                .name("metadataWriter")
+                .resource(new FileSystemResource(outputFile))
+                .lineAggregator(new DelimitedLineAggregator<>() {{
+                    setDelimiter(",");
+                    setFieldExtractor(item -> new Object[]{
+                            item.filename(),
+                            item.width(),
+                            item.height()
+                    });
+                }})
+                .headerCallback(writer -> writer.write("filename,width,height"))
+                .build();
+    }
+
+    // ----------------------- Step -----------------------
+    @Bean
+    public Step processImagesStep(JobRepository jobRepository,
+                                  PlatformTransactionManager transactionManager,
+                                  MultiResourceItemReader<Resource> imageFileReader,
+                                  ItemProcessor<Resource, ImageMetadata> imageProcessor,
+                                  FlatFileItemWriter<ImageMetadata> metadataWriter) {
+
+        return new StepBuilder("processImagesStep", jobRepository)
+                .<Resource, ImageMetadata>chunk(10, transactionManager) // Chunk size 10 (adjust based on image size/memory)
+                .reader(imageFileReader)
+                .processor(imageProcessor)
+                .writer(metadataWriter)
+                .build();
+    }
+
+    // ----------------------- Job -----------------------
+    @Bean
+    public Job imageProcessingJob(JobRepository jobRepository, Step processImagesStep) {
+        return new JobBuilder("imageProcessingJob", jobRepository)
+                .start(processImagesStep)
+                .build();
+    }
+}
