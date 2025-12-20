@@ -1,0 +1,371 @@
+I'll help you set up a Spring Batch job with partitioning to efficiently process millions of image files across nested folders.
+
+## Overview
+
+Partitioning allows parallel processing by dividing the work across multiple threads/workers. For your use case, we'll partition by directory paths so each partition processes files from specific folders.
+
+## Implementation
+
+### 1. Configuration Class
+
+```java
+@Configuration
+@EnableBatchProcessing
+public class ImageProcessingBatchConfig {
+
+    @Autowired
+    private JobBuilderFactory jobBuilderFactory;
+
+    @Autowired
+    private StepBuilderFactory stepBuilderFactory;
+
+    @Value("${image.root.directory}")
+    private String rootDirectory;
+
+    @Value("${batch.partition.grid.size:10}")
+    private int gridSize;
+
+    @Bean
+    public Job imageProcessingJob() {
+        return jobBuilderFactory.get("imageProcessingJob")
+                .start(masterStep())
+                .build();
+    }
+
+    @Bean
+    public Step masterStep() {
+        return stepBuilderFactory.get("masterStep")
+                .partitioner("slaveStep", partitioner())
+                .step(slaveStep())
+                .gridSize(gridSize)
+                .taskExecutor(taskExecutor())
+                .build();
+    }
+
+    @Bean
+    public Step slaveStep() {
+        return stepBuilderFactory.get("slaveStep")
+                .<File, ImageData>chunk(100)
+                .reader(imageFileReader(null))
+                .processor(imageProcessor())
+                .writer(imageWriter())
+                .build();
+    }
+
+    @Bean
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(20);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("image-partition-");
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean
+    public DirectoryPartitioner partitioner() {
+        return new DirectoryPartitioner(rootDirectory);
+    }
+
+    @Bean
+    @StepScope
+    public ItemReader<File> imageFileReader(
+            @Value("#{stepExecutionContext['directoryPath']}") String directoryPath) {
+        return new ImageFileReader(directoryPath);
+    }
+
+    @Bean
+    public ItemProcessor<File, ImageData> imageProcessor() {
+        return new ImageFileProcessor();
+    }
+
+    @Bean
+    public ItemWriter<ImageData> imageWriter() {
+        return new ImageDataWriter();
+    }
+}
+```
+
+### 2. Custom Partitioner
+
+```java
+public class DirectoryPartitioner implements Partitioner {
+
+    private final String rootDirectory;
+
+    public DirectoryPartitioner(String rootDirectory) {
+        this.rootDirectory = rootDirectory;
+    }
+
+    @Override
+    public Map<String, ExecutionContext> partition(int gridSize) {
+        Map<String, ExecutionContext> partitions = new HashMap<>();
+        
+        try {
+            List<Path> directories = collectDirectories(Paths.get(rootDirectory));
+            
+            // Distribute directories across partitions
+            int partitionIndex = 0;
+            for (Path directory : directories) {
+                ExecutionContext context = new ExecutionContext();
+                context.putString("directoryPath", directory.toString());
+                partitions.put("partition" + partitionIndex, context);
+                partitionIndex++;
+            }
+            
+            // If fewer directories than gridSize, we'll have fewer partitions
+            // If more directories, consider grouping them
+            if (directories.size() > gridSize * 2) {
+                partitions = redistributePartitions(directories, gridSize);
+            }
+            
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to partition directories", e);
+        }
+        
+        return partitions;
+    }
+
+    private List<Path> collectDirectories(Path root) throws IOException {
+        List<Path> directories = new ArrayList<>();
+        
+        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                // Check if directory contains image files
+                try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, 
+                        path -> isImageFile(path.toString()))) {
+                    if (stream.iterator().hasNext()) {
+                        directories.add(dir);
+                    }
+                } catch (IOException e) {
+                    // Log and continue
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        
+        return directories;
+    }
+
+    private Map<String, ExecutionContext> redistributePartitions(
+            List<Path> directories, int gridSize) {
+        Map<String, ExecutionContext> partitions = new HashMap<>();
+        int dirsPerPartition = (int) Math.ceil((double) directories.size() / gridSize);
+        
+        for (int i = 0; i < gridSize; i++) {
+            int start = i * dirsPerPartition;
+            int end = Math.min(start + dirsPerPartition, directories.size());
+            
+            if (start < directories.size()) {
+                ExecutionContext context = new ExecutionContext();
+                List<String> paths = directories.subList(start, end).stream()
+                        .map(Path::toString)
+                        .collect(Collectors.toList());
+                context.put("directoryPaths", paths);
+                partitions.put("partition" + i, context);
+            }
+        }
+        
+        return partitions;
+    }
+
+    private boolean isImageFile(String filename) {
+        String lower = filename.toLowerCase();
+        return lower.endsWith(".jpg") || lower.endsWith(".jpeg") || 
+               lower.endsWith(".png") || lower.endsWith(".gif") || 
+               lower.endsWith(".bmp");
+    }
+}
+```
+
+### 3. Image File Reader
+
+```java
+public class ImageFileReader implements ItemReader<File> {
+
+    private final Iterator<File> fileIterator;
+    private static final Logger log = LoggerFactory.getLogger(ImageFileReader.class);
+
+    public ImageFileReader(String directoryPath) {
+        List<File> imageFiles = collectImageFiles(directoryPath);
+        this.fileIterator = imageFiles.iterator();
+        log.info("Initialized reader with {} files from {}", imageFiles.size(), directoryPath);
+    }
+
+    @Override
+    public File read() {
+        if (fileIterator.hasNext()) {
+            return fileIterator.next();
+        }
+        return null; // Signals end of data
+    }
+
+    private List<File> collectImageFiles(String directoryPath) {
+        List<File> imageFiles = new ArrayList<>();
+        File directory = new File(directoryPath);
+        
+        if (!directory.exists() || !directory.isDirectory()) {
+            return imageFiles;
+        }
+
+        try {
+            Files.walkFileTree(Paths.get(directoryPath), new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (isImageFile(file.toString())) {
+                        imageFiles.add(file.toFile());
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            log.error("Error collecting image files from {}", directoryPath, e);
+        }
+
+        return imageFiles;
+    }
+
+    private boolean isImageFile(String filename) {
+        String lower = filename.toLowerCase();
+        return lower.endsWith(".jpg") || lower.endsWith(".jpeg") || 
+               lower.endsWith(".png") || lower.endsWith(".gif") || 
+               lower.endsWith(".bmp");
+    }
+}
+```
+
+### 4. Image Processor
+
+```java
+public class ImageFileProcessor implements ItemProcessor<File, ImageData> {
+
+    private static final Logger log = LoggerFactory.getLogger(ImageFileProcessor.class);
+
+    @Override
+    public ImageData process(File imageFile) throws Exception {
+        try {
+            byte[] imageBytes = Files.readAllBytes(imageFile.toPath());
+            
+            ImageData imageData = new ImageData();
+            imageData.setFileName(imageFile.getName());
+            imageData.setFilePath(imageFile.getAbsolutePath());
+            imageData.setImageBytes(imageBytes);
+            imageData.setFileSize(imageBytes.length);
+            imageData.setProcessedTime(LocalDateTime.now());
+            
+            return imageData;
+            
+        } catch (IOException e) {
+            log.error("Failed to read image file: {}", imageFile.getAbsolutePath(), e);
+            // Return null to skip this item, or throw exception to fail the step
+            return null;
+        }
+    }
+}
+```
+
+### 5. Data Model
+
+```java
+public class ImageData {
+    private String fileName;
+    private String filePath;
+    private byte[] imageBytes;
+    private long fileSize;
+    private LocalDateTime processedTime;
+
+    // Getters and setters
+    public String getFileName() { return fileName; }
+    public void setFileName(String fileName) { this.fileName = fileName; }
+    
+    public String getFilePath() { return filePath; }
+    public void setFilePath(String filePath) { this.filePath = filePath; }
+    
+    public byte[] getImageBytes() { return imageBytes; }
+    public void setImageBytes(byte[] imageBytes) { this.imageBytes = imageBytes; }
+    
+    public long getFileSize() { return fileSize; }
+    public void setFileSize(long fileSize) { this.fileSize = fileSize; }
+    
+    public LocalDateTime getProcessedTime() { return processedTime; }
+    public void setProcessedTime(LocalDateTime processedTime) { 
+        this.processedTime = processedTime; 
+    }
+}
+```
+
+### 6. Writer Implementation
+
+```java
+public class ImageDataWriter implements ItemWriter<ImageData> {
+
+    private static final Logger log = LoggerFactory.getLogger(ImageDataWriter.class);
+
+    @Override
+    public void write(List<? extends ImageData> items) throws Exception {
+        for (ImageData imageData : items) {
+            if (imageData != null) {
+                // Process the byte array - examples:
+                // 1. Store in database
+                // 2. Upload to cloud storage
+                // 3. Process/transform the image
+                // 4. Generate thumbnails
+                
+                log.info("Processed image: {} ({} bytes)", 
+                        imageData.getFileName(), 
+                        imageData.getFileSize());
+                
+                // Example: Store metadata in database
+                // imageRepository.save(imageData);
+                
+                // Example: Upload to S3
+                // s3Service.upload(imageData.getImageBytes(), imageData.getFileName());
+            }
+        }
+    }
+}
+```
+
+### 7. Application Properties
+
+```properties
+# Image processing configuration
+image.root.directory=/path/to/your/images
+batch.partition.grid.size=10
+
+# Spring Batch configuration
+spring.batch.job.enabled=false
+spring.batch.initialize-schema=always
+
+# Database configuration (if storing metadata)
+spring.datasource.url=jdbc:postgresql://localhost:5432/batch_db
+spring.datasource.username=your_username
+spring.datasource.password=your_password
+```
+
+## Key Features
+
+1. **Parallel Processing**: Uses ThreadPoolTaskExecutor for concurrent partition execution
+2. **Chunk Processing**: Processes images in chunks of 100 for better memory management
+3. **Nested Directory Support**: Recursively walks through all subdirectories
+4. **Fault Tolerance**: Can be enhanced with skip/retry policies
+5. **Scalability**: Grid size determines parallelism level
+
+## Performance Optimization Tips
+
+1. **Adjust chunk size** based on average image size
+2. **Tune thread pool** based on available CPU cores and I/O characteristics
+3. **Add skip policy** for corrupted files:
+
+```java
+.faultTolerant()
+.skipLimit(1000)
+.skip(IOException.class)
+```
+
+4. **Consider memory usage** - don't hold too many byte arrays in memory
+5. **Add progress monitoring** with listeners
+
+This setup will efficiently process millions of images across nested folders using Spring Batch partitioning!
