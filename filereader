@@ -1,295 +1,135 @@
-import org.springframework.batch.item.ItemReader;
-import org.springframework.batch.item.ResourceAwareItemReaderItemStream;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Component;
-
-@Component
-public class SingleResourceItemReader implements ItemReader<Resource>, ResourceAwareItemReaderItemStream<Resource> {
-
-    private Resource resource;
-    private boolean hasRead = true;  // Start as true to handle edge cases
-
-    @Override
-    public Resource read() {
-        if (hasRead || resource == null) {
-            return null;
-        }
-        hasRead = true;
-        return resource;
-    }
-
-    @Override
-    public void setResource(Resource resource) {
-        this.resource = resource;
-        hasRead = false;  // Reset for the new resource
-    }
-
-    // ItemStream methods (minimal implementation; MultiResourceItemReader handles most state)
-    @Override
-    public void open(org.springframework.batch.item.ExecutionContext executionContext) {
-        // No-op
-    }
-
-    @Override
-    public void update(org.springframework.batch.item.ExecutionContext executionContext) {
-        // No-op
-    }
-
-    @Override
-    public void close() {
-        // No-op
-    }
-}
-
-
-
-
-import org.springframework.batch.core.configuration.annotation.StepScope;
-import org.springframework.batch.item.file.MultiResourceItemReader;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
-
-import java.io.IOException;
-import java.util.Arrays;
-
-@Configuration
-public class BatchConfig {
-
-    @Bean
-    @StepScope  // Required for late binding of job parameters
-    public MultiResourceItemReader<Resource> imageFileReader(
-            @Value("#{jobParameters['input.directory']}") String inputDirectory,
-            SingleResourceItemReader delegate) throws IOException {
-
-        MultiResourceItemReader<Resource> reader = new MultiResourceItemReader<>();
-        reader.setDelegate(delegate);
-
-        // Resolve resources recursively
-        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-        String pattern = "file:" + inputDirectory.replace("\\", "/") + "/**/*";  // All files recursively
-
-        Resource[] allResources = resolver.getResources(pattern);
-
-        // Optional: Filter by common image extensions (case-insensitive)
-        Resource[] imageResources = Arrays.stream(allResources)
-                .filter(r -> {
-                    String filename = r.getFilename();
-                    if (filename == null) return false;
-                    String lower = filename.toLowerCase();
-                    return lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
-                           lower.endsWith(".png") || lower.endsWith(".gif") ||
-                           lower.endsWith(".bmp") || lower.endsWith(".webp");
-                })
-                .sorted((r1, r2) -> r1.getFilename().compareTo(r2.getFilename()))  // Optional: sort alphabetically
-                .toArray(Resource[]::new);
-
-        reader.setResources(imageResources);
-        reader.setSaveState(true);  // For restartability
-
-        return reader;
-    }
-
-    // Other beans: ItemProcessor, ItemWriter, Step, Job...
-}
-
-
-
-
-
-import org.springframework.batch.item.ItemProcessor;
-import java.awt.image.BufferedImage;
-import javax.imageio.ImageIO;
-import org.springframework.core.io.Resource;
-
-public class ImageProcessingProcessor implements ItemProcessor<Resource, ProcessedImage> {  // Replace ProcessedImage with your DTO
-
-    @Override
-    public ProcessedImage process(Resource resource) throws Exception {
-        String filename = resource.getFilename();
-
-        try (var inputStream = resource.getInputStream()) {
-            BufferedImage image = ImageIO.read(inputStream);
-            if (image == null) {
-                // Not a readable image format; skip
-                System.out.println("Skipping non-image file: " + filename);
-                return null;
-            }
-
-            // Process the image here (e.g., resize, analyze, etc.)
-            // Example: just wrap it
-            return new ProcessedImage(filename, image);
-        }
-    }
-}
-
-
-
-
-import org.springframework.batch.core.Job;
-import org.springframework.batch.core.Step;
-import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.JobOperator;
+import org.springframework.batch.core.launch.support.SimpleJobOperator;
 import org.springframework.batch.core.repository.JobRepository;
-import org.springframework.batch.core.step.builder.StepBuilder;
-import org.springframework.batch.item.ItemProcessor;
-import org.springframework.batch.item.ItemReader;
-import org.springframework.batch.item.file.FlatFileItemWriter;
-import org.springframework.batch.item.file.MultiResourceItemReader;
-import org.springframework.batch.item.file.builder.FlatFileItemWriterBuilder;
-import org.springframework.batch.item.file.transform.DelimitedLineAggregator;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.FileSystemResource;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.core.task.SyncTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.util.Arrays;
-
 @Configuration
-public class BatchConfig {
+public class BatchConfiguration {
 
-    // ----------------------- DTO for processed image metadata -----------------------
-    public record ImageMetadata(String filename, int width, int height) {}
+    @Autowired
+    private JobLauncher jobLauncher;
 
-    // ----------------------- Delegate reader: returns one Resource per file -----------------------
-    public static class SingleResourceItemReader implements ItemReader<Resource>, org.springframework.batch.core.item.ResourceAware {
+    @Autowired
+    private JobRepository jobRepository;
 
-        private Resource resource;
-        private boolean hasBeenRead = false;
+    @Autowired
+    private JobExplorer jobExplorer;
 
-        @Override
-        public Resource read() {
-            if (hasBeenRead || resource == null) {
-                return null;
-            }
-            hasBeenRead = true;
-            return resource;
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    @Bean
+    public JobOperator jobOperator() {
+        SimpleJobOperator jobOperator = new SimpleJobOperator();
+        jobOperator.setJobLauncher(jobLauncher);
+        jobOperator.setJobRepository(jobRepository);
+        jobOperator.setJobExplorer(jobExplorer);
+        jobOperator.setTransactionManager(transactionManager);
+        // Optional: for concurrent launches; SyncTaskExecutor is safe for simple cases
+        jobOperator.setTaskExecutor(new SyncTaskExecutor());
+        return jobOperator;
+    }
+}
+
+
+
+
+
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.explore.JobExplorer;
+import org.springframework.batch.core.launch.JobOperator;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.util.Comparator;
+import java.util.List;
+
+@Component
+public class JobRestartService {
+
+    @Autowired
+    private JobOperator jobOperator;
+
+    @Autowired
+    private JobExplorer jobExplorer;
+
+    @Autowired
+    private Job job;  // Your job bean, e.g., imageToKafkaJob
+
+    private static final String JOB_NAME = "imageToKafkaJob";  // Replace with your job name
+
+    /**
+     * Restarts the most recent FAILED JobExecution for the job.
+     */
+    public Long restartLastFailedJob() throws Exception {
+        // Get the latest JobInstance (by start time descending)
+        List<JobInstance> jobInstances = jobExplorer.getJobInstances(JOB_NAME, 0, 100);  // Adjust count if many instances
+        if (jobInstances.isEmpty()) {
+            System.out.println("No job instances found for " + JOB_NAME);
+            return null;
         }
 
-        @Override
-        public void setResource(Resource resource) {
-            this.resource = resource;
-            hasBeenRead = false;
+        // Find the most recent FAILED execution
+        JobExecution failedExecution = jobInstances.stream()
+                .flatMap(instance -> jobExplorer.getJobExecutions(instance).stream())
+                .filter(exec -> exec.getStatus() == BatchStatus.FAILED || exec.getStatus() == BatchStatus.STOPPED)
+                .max(Comparator.comparing(JobExecution::getStartTime))
+                .orElse(null);
+
+        if (failedExecution == null) {
+            System.out.println("No failed executions found. Launch a new job instead.");
+            return launchNewJob();  // Optional: fallback to new launch
         }
+
+        System.out.println("Restarting failed JobExecution ID: " + failedExecution.getId());
+        return jobOperator.restart(failedExecution.getId());
     }
 
-    // ----------------------- Bean: shared delegate -----------------------
-    @Bean
-    public SingleResourceItemReader singleResourceDelegate() {
-        return new SingleResourceItemReader();
+    /**
+     * Optional: Restart by specific execution ID (e.g., from logs or DB query)
+     */
+    public Long restartByExecutionId(Long executionId) throws Exception {
+        JobExecution execution = jobExplorer.getJobExecution(executionId);
+        if (execution == null || !execution.getStatus().isUnsuccessful()) {
+            System.out.println("Execution ID " + executionId + " not found or not failed.");
+            return null;
+        }
+        System.out.println("Restarting JobExecution ID: " + executionId);
+        return jobOperator.restart(executionId);
     }
 
-    // ----------------------- MultiResourceItemReader (recursive, filtered) -----------------------
-    @Bean
-    @org.springframework.batch.core.configuration.annotation.StepScope
-    public MultiResourceItemReader<Resource> imageFileReader(
-            @Value("#{jobParameters['input.directory']}") String inputDirectory,
-            SingleResourceItemReader delegate) throws IOException {
+    /**
+     * Fallback: Launch a completely new job instance (if no failed one)
+     */
+    private Long launchNewJob() throws Exception {
+        JobParameters params = new JobParametersBuilder()
+                .addString("inputDir", "/path/to/images")  // Use your fixed parameters
+                .toJobParameters();
+        JobExecution execution = jobLauncher.run(job, params);
+        return execution.getId();
+    }
+}
 
-        MultiResourceItemReader<Resource> reader = new MultiResourceItemReader<>();
-        reader.setDelegate(delegate);
-        reader.setSaveState(true); // Enables restartability
 
-        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+@SpringBootApplication
+@EnableBatchProcessing
+public class Application implements CommandLineRunner {
 
-        // Recursive pattern - all files
-        String pattern = "file:" + inputDirectory.replace("\\", "/") + "/**/*";
-        Resource[] allResources = resolver.getResources(pattern);
+    @Autowired
+    private JobRestartService restartService;
 
-        // Filter for common image extensions (case-insensitive)
-        Resource[] imageResources = Arrays.stream(allResources)
-                .filter(r -> {
-                    String filename = r.getFilename();
-                    if (filename == null) return false;
-                    String lower = filename.toLowerCase();
-                    return lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
-                           lower.endsWith(".png") || lower.endsWith(".gif") ||
-                           lower.endsWith(".bmp") || lower.endsWith(".tiff") ||
-                           lower.endsWith(".tif") || lower.endsWith(".webp");
-                })
-                .sorted((r1, r2) -> {
-                    String f1 = r1.getFilename();
-                    String f2 = r2.getFilename();
-                    return f1 != null && f2 != null ? f1.compareTo(f2) : 0;
-                })
-                .toArray(Resource[]::new);
-
-        reader.setResources(imageResources);
-
-        return reader;
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
     }
 
-    // ----------------------- ItemProcessor: loads image and extracts metadata -----------------------
-    @Bean
-    public ItemProcessor<Resource, ImageMetadata> imageProcessor() {
-        return resource -> {
-            String filename = resource.getFilename();
-
-            try (var inputStream = resource.getInputStream()) {
-                BufferedImage image = ImageIO.read(inputStream);
-                if (image == null) {
-                    // Not a supported/readable image → skip
-                    System.out.println("Skipping non-image or unsupported format: " + filename);
-                    return null;
-                }
-                return new ImageMetadata(filename, image.getWidth(), image.getHeight());
-            } catch (Exception e) {
-                // Log and skip, or rethrow to fail chunk
-                System.err.println("Failed to read image: " + filename + " - " + e.getMessage());
-                return null; // Skip on error
-            }
-        };
-    }
-
-    // ----------------------- FlatFileItemWriter: writes CSV metadata -----------------------
-    @Bean
-    @org.springframework.batch.core.configuration.annotation.StepScope
-    public FlatFileItemWriter<ImageMetadata> metadataWriter(
-            @Value("#{jobParameters['output.file']}") String outputFile) {
-
-        return new FlatFileItemWriterBuilder<ImageMetadata>()
-                .name("metadataWriter")
-                .resource(new FileSystemResource(outputFile))
-                .lineAggregator(new DelimitedLineAggregator<>() {{
-                    setDelimiter(",");
-                    setFieldExtractor(item -> new Object[]{
-                            item.filename(),
-                            item.width(),
-                            item.height()
-                    });
-                }})
-                .headerCallback(writer -> writer.write("filename,width,height"))
-                .build();
-    }
-
-    // ----------------------- Step -----------------------
-    @Bean
-    public Step processImagesStep(JobRepository jobRepository,
-                                  PlatformTransactionManager transactionManager,
-                                  MultiResourceItemReader<Resource> imageFileReader,
-                                  ItemProcessor<Resource, ImageMetadata> imageProcessor,
-                                  FlatFileItemWriter<ImageMetadata> metadataWriter) {
-
-        return new StepBuilder("processImagesStep", jobRepository)
-                .<Resource, ImageMetadata>chunk(10, transactionManager) // Chunk size 10 (adjust based on image size/memory)
-                .reader(imageFileReader)
-                .processor(imageProcessor)
-                .writer(metadataWriter)
-                .build();
-    }
-
-    // ----------------------- Job -----------------------
-    @Bean
-    public Job imageProcessingJob(JobRepository jobRepository, Step processImagesStep) {
-        return new JobBuilder("imageProcessingJob", jobRepository)
-                .start(processImagesStep)
-                .build();
+    @Override
+    public void run(String... args) throws Exception {
+        if (args.length > 0 && "restart".equals(args[0])) {
+            restartService.restartLastFailedJob();
+        }
     }
 }
